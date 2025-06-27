@@ -1,5 +1,5 @@
 import { db } from "../db";
-import { projects, type Project, type NewProject } from "../db/schema";
+import { projects, type Project, type NewProject } from "../db/project_schema";
 import { eq, desc, and } from "drizzle-orm";
 
 class ProjectService {

@@ -1,6 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 
-import * as schema from "./schema";
+import * as schema from "./project_schema";
 const db = drizzle(process.env.DATABASE_URL);
 
 

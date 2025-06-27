@@ -1,5 +1,5 @@
 import { db } from '../db';
-import { messages, projects, type Message, type NewMessage } from '../db/schema';
+import { messages, projects, type Message, type NewMessage } from '../db/project_schema';
 import { eq } from 'drizzle-orm';
 
 class MessageService {
