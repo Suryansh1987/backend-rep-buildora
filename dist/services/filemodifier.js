@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -22,51 +55,162 @@ const TargettedNodes_1 = require("./processor/TargettedNodes");
 const ComponentAddition_1 = require("./processor/ComponentAddition");
 const TokenTracer_1 = require("../utils/TokenTracer");
 const Redis_1 = require("./Redis");
+const modification_1 = require("./filemodifier/modification");
+const fs_1 = require("fs");
+const path = __importStar(require("path"));
 class StatelessIntelligentFileModifier {
     constructor(anthropic, reactBasePath, sessionId, redisUrl) {
         this.anthropic = anthropic;
         this.reactBasePath = reactBasePath;
         this.sessionId = sessionId;
-        this.redis = new Redis_1.RedisService(redisUrl);
+        this.redis = new Redis_1.RedisService(redisUrl || process.env.REDIS_URL || 'redis://localhost:6379');
+        // Initialize early to avoid undefined issues
+        this.streamCallback = undefined;
+        // Initialize components
+        this.initializeComponents();
+        this.setupStreamCallbacks();
+        // Log initialization
+        this.streamUpdate(`🏗️ Stateless file modifier initialization:`);
+        this.streamUpdate(`   React Base Path: ${reactBasePath}`);
+        this.streamUpdate(`   Session ID: ${sessionId}`);
+    }
+    initializeComponents() {
         // Initialize original modules
-        this.scopeAnalyzer = new scopeanalyzer_1.ScopeAnalyzer(anthropic);
-        this.componentGenerationSystem = new component_1.ComponentGenerationSystem(anthropic, reactBasePath);
-        this.dependencyManager = new dependancy_1.DependencyManager(new Map()); // Will be populated from Redis
-        this.fallbackMechanism = new fallback_1.FallbackMechanism(anthropic);
-        // Initialize new modular processors with proper arguments
+        this.scopeAnalyzer = new scopeanalyzer_1.ScopeAnalyzer(this.anthropic);
+        this.componentGenerationSystem = new component_1.ComponentGenerationSystem(this.anthropic, this.reactBasePath);
+        this.dependencyManager = new dependancy_1.DependencyManager(new Map());
+        this.fallbackMechanism = new fallback_1.FallbackMechanism(this.anthropic);
+        // Initialize processors
         this.tokenTracker = new TokenTracer_1.TokenTracker();
         this.astAnalyzer = new Astanalyzer_1.ASTAnalyzer();
-        this.projectAnalyzer = new projectanalyzer_1.ProjectAnalyzer(reactBasePath);
-        this.fullFileProcessor = new Fullfileprocessor_1.FullFileProcessor(anthropic, this.tokenTracker, this.astAnalyzer);
-        this.targetedNodesProcessor = new TargettedNodes_1.TargetedNodesProcessor(anthropic, this.tokenTracker, this.astAnalyzer);
-        this.componentAdditionProcessor = new ComponentAddition_1.ComponentAdditionProcessor(anthropic, reactBasePath, this.tokenTracker);
+        this.projectAnalyzer = new projectanalyzer_1.ProjectAnalyzer(this.reactBasePath);
+        // Initialize processors with fallback for constructor compatibility
+        try {
+            this.fullFileProcessor = new Fullfileprocessor_1.FullFileProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer, this.reactBasePath);
+        }
+        catch (error) {
+            this.fullFileProcessor = new Fullfileprocessor_1.FullFileProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer);
+            if ('reactBasePath' in this.fullFileProcessor) {
+                this.fullFileProcessor.reactBasePath = this.reactBasePath;
+            }
+        }
+        try {
+            this.targetedNodesProcessor = new TargettedNodes_1.TargetedNodesProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer, this.reactBasePath);
+        }
+        catch (error) {
+            this.targetedNodesProcessor = new TargettedNodes_1.TargetedNodesProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer);
+            if ('reactBasePath' in this.targetedNodesProcessor) {
+                this.targetedNodesProcessor.reactBasePath = this.reactBasePath;
+            }
+        }
+        this.componentAdditionProcessor = new ComponentAddition_1.ComponentAdditionProcessor(this.anthropic, this.reactBasePath, this.tokenTracker);
+    }
+    setupStreamCallbacks() {
+        const streamUpdate = (message) => this.streamUpdate(message);
+        // Set callbacks with safety checks
+        if (this.scopeAnalyzer && typeof this.scopeAnalyzer.setStreamCallback === 'function') {
+            this.scopeAnalyzer.setStreamCallback(streamUpdate);
+        }
+        if (this.componentGenerationSystem && typeof this.componentGenerationSystem.setStreamCallback === 'function') {
+            this.componentGenerationSystem.setStreamCallback(streamUpdate);
+        }
+        if (this.fallbackMechanism && typeof this.fallbackMechanism.setStreamCallback === 'function') {
+            this.fallbackMechanism.setStreamCallback(streamUpdate);
+        }
+        if (this.astAnalyzer && typeof this.astAnalyzer.setStreamCallback === 'function') {
+            this.astAnalyzer.setStreamCallback(streamUpdate);
+        }
+        if (this.projectAnalyzer && typeof this.projectAnalyzer.setStreamCallback === 'function') {
+            this.projectAnalyzer.setStreamCallback(streamUpdate);
+        }
+        if (this.fullFileProcessor && typeof this.fullFileProcessor.setStreamCallback === 'function') {
+            this.fullFileProcessor.setStreamCallback(streamUpdate);
+        }
+        if (this.targetedNodesProcessor && typeof this.targetedNodesProcessor.setStreamCallback === 'function') {
+            this.targetedNodesProcessor.setStreamCallback(streamUpdate);
+        }
+        if (this.componentAdditionProcessor && typeof this.componentAdditionProcessor.setStreamCallback === 'function') {
+            this.componentAdditionProcessor.setStreamCallback(streamUpdate);
+        }
+    }
+    setStreamCallback(callback) {
+        this.streamCallback = callback;
+        this.setupStreamCallbacks();
+    }
+    streamUpdate(message) {
+        if (this.streamCallback) {
+            this.streamCallback(message);
+        }
     }
     // ==============================================================
     // SESSION MANAGEMENT
     // ==============================================================
     initializeSession() {
         return __awaiter(this, void 0, void 0, function* () {
+            this.streamUpdate('🚀 Initializing stateless session...');
+            this.streamUpdate(`📍 React Base Path: ${this.reactBasePath}`);
+            // Verify directory structure
+            const structureValid = yield this.verifyDirectoryStructure();
+            if (!structureValid) {
+                throw new Error(`Directory structure is invalid: ${this.reactBasePath}`);
+            }
             const existingStartTime = yield this.redis.getSessionStartTime(this.sessionId);
             if (!existingStartTime) {
                 yield this.redis.setSessionStartTime(this.sessionId, new Date().toISOString());
             }
-            const hasCache = yield this.redis.hasProjectFiles(this.sessionId);
-            if (!hasCache) {
-                this.streamUpdate('🔄 Building project tree (first time for this session)...');
-                yield this.buildProjectTree();
+            // Build project tree
+            this.streamUpdate('🔄 Building project tree...');
+            yield this.buildProjectTree();
+        });
+    }
+    verifyDirectoryStructure() {
+        return __awaiter(this, void 0, void 0, function* () {
+            this.streamUpdate('🏗️ Verifying directory structure...');
+            try {
+                yield fs_1.promises.access(this.reactBasePath);
+                this.streamUpdate(`✅ Directory exists: ${this.reactBasePath}`);
+                return true;
             }
-            else {
-                this.streamUpdate('📁 Loading cached project files from Redis...');
+            catch (error) {
+                this.streamUpdate(`❌ Directory does not exist: ${this.reactBasePath}`);
+                return false;
             }
         });
     }
-    clearSession() {
+    buildProjectTree() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.redis.clearSession(this.sessionId);
+            this.streamUpdate('📂 Analyzing React project structure...');
+            try {
+                let projectFiles = new Map();
+                // Update dependency manager
+                const currentProjectFiles = yield this.getProjectFiles();
+                this.dependencyManager = new dependancy_1.DependencyManager(currentProjectFiles);
+                // Use project analyzer
+                yield this.projectAnalyzer.buildProjectTree(projectFiles, this.dependencyManager, (message) => this.streamUpdate(message));
+                if (projectFiles.size === 0) {
+                    throw new Error('No React files found in directory');
+                }
+                // CRITICAL: Update all file paths to current reactBasePath
+                const fixedProjectFiles = new Map();
+                for (const [relativePath, file] of projectFiles) {
+                    const currentFilePath = this.resolveCurrentFilePath(relativePath);
+                    const fixedFile = Object.assign(Object.assign({}, file), { path: currentFilePath // Use current build directory path
+                     });
+                    fixedProjectFiles.set(relativePath, fixedFile);
+                    this.streamUpdate(`🔧 Fixed path: ${relativePath} → ${currentFilePath}`);
+                }
+                // Store fixed paths in Redis
+                yield this.setProjectFiles(fixedProjectFiles);
+                this.streamUpdate(`✅ Loaded ${fixedProjectFiles.size} React files with updated paths`);
+            }
+            catch (error) {
+                console.error('Error building project tree:', error);
+                throw error;
+            }
         });
     }
     // ==============================================================
-    // PROJECT FILES MANAGEMENT (Redis-backed)
+    // REDIS OPERATIONS (Simplified)
     // ==============================================================
     getProjectFiles() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -79,230 +223,81 @@ class StatelessIntelligentFileModifier {
             yield this.redis.setProjectFiles(this.sessionId, projectFiles);
         });
     }
-    updateProjectFile(filePath, projectFile) {
+    getModificationSummary() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.redis.updateProjectFile(this.sessionId, filePath, projectFile);
-        });
-    }
-    // ==============================================================
-    // MODIFICATION SUMMARY (Redis-backed)
-    // ==============================================================
-    addModificationChange(type, file, description, options) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const change = {
-                type,
-                file,
-                description,
-                timestamp: new Date().toISOString(),
-                approach: options === null || options === void 0 ? void 0 : options.approach,
-                success: options === null || options === void 0 ? void 0 : options.success,
-                details: {
-                    linesChanged: options === null || options === void 0 ? void 0 : options.linesChanged,
-                    componentsAffected: options === null || options === void 0 ? void 0 : options.componentsAffected,
-                    reasoning: options === null || options === void 0 ? void 0 : options.reasoning
-                }
-            };
-            yield this.redis.addModificationChange(this.sessionId, change);
+            return new modification_1.RedisModificationSummary(this.redis, this.sessionId);
         });
     }
     getModificationContextualSummary() {
         return __awaiter(this, void 0, void 0, function* () {
-            const changes = yield this.redis.getModificationChanges(this.sessionId);
-            if (changes.length === 0) {
-                return "";
-            }
-            const recentChanges = changes.slice(-5);
-            const uniqueFiles = new Set(changes.map(c => c.file));
-            const sessionStartTime = yield this.redis.getSessionStartTime(this.sessionId);
-            const durationMs = new Date().getTime() - new Date(sessionStartTime).getTime();
-            const minutes = Math.floor(durationMs / 60000);
-            const seconds = Math.floor((durationMs % 60000) / 1000);
-            const duration = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-            let summary = `
-**RECENT MODIFICATIONS IN THIS SESSION:**
-${recentChanges.map(change => {
-                const icon = this.getChangeIcon(change);
-                const status = change.success === false ? ' (failed)' : '';
-                return `• ${icon} ${change.file}${status}: ${change.description}`;
-            }).join('\n')}
-
-**Session Context:**
-• Total files modified: ${uniqueFiles.size}
-• Session duration: ${duration}
-    `.trim();
-            return summary;
+            const modificationSummary = yield this.getModificationSummary();
+            return yield modificationSummary.getContextualSummary();
         });
     }
     getMostModifiedFiles() {
         return __awaiter(this, void 0, void 0, function* () {
-            const changes = yield this.redis.getModificationChanges(this.sessionId);
-            const fileStats = {};
-            changes.forEach(change => {
-                fileStats[change.file] = (fileStats[change.file] || 0) + 1;
-            });
-            return Object.entries(fileStats)
-                .map(([file, count]) => ({ file, count }))
-                .sort((a, b) => b.count - a.count)
-                .slice(0, 10);
+            const modificationSummary = yield this.getModificationSummary();
+            return yield modificationSummary.getMostModifiedFiles();
         });
     }
     // ==============================================================
-    // PROJECT TREE BUILDING - Compatible with your existing interface
-    // ==============================================================
-    buildProjectTree() {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('📂 Analyzing React project structure...');
-            try {
-                // Try to use your existing buildProjectTree method signature
-                let projectFiles = new Map();
-                // Update dependency manager with current Redis data
-                const currentProjectFiles = yield this.getProjectFiles();
-                this.dependencyManager = new dependancy_1.DependencyManager(currentProjectFiles);
-                // Call buildProjectTree with the signature your class expects
-                const buildResult = yield this.projectAnalyzer.buildProjectTree(projectFiles, this.dependencyManager, (message) => this.streamUpdate(message));
-                // If buildProjectTree returns the files instead of mutating the parameter
-                if (buildResult && buildResult.size > 0) {
-                    projectFiles = buildResult;
-                }
-                if (projectFiles.size === 0) {
-                    throw new Error('No React files found in project');
-                }
-                // Store in Redis
-                yield this.setProjectFiles(projectFiles);
-                this.streamUpdate(`✅ Loaded ${projectFiles.size} React files into cache`);
-            }
-            catch (error) {
-                console.error('Error building project tree:', error);
-                throw error;
-            }
-        });
-    }
-    // ==============================================================
-    // STREAM UPDATES
-    // ==============================================================
-    setStreamCallback(callback) {
-        this.streamCallback = callback;
-    }
-    streamUpdate(message) {
-        if (this.streamCallback) {
-            this.streamCallback(message);
-        }
-    }
-    // ==============================================================
-    // COMPONENT ADDITION HANDLER
+    // MODIFICATION HANDLERS
     // ==============================================================
     handleComponentAddition(prompt, scope, projectSummaryCallback) {
         return __awaiter(this, void 0, void 0, function* () {
             const projectFiles = yield this.getProjectFiles();
-            const modificationSummary = {
-                addChange: (type, file, description, options) => __awaiter(this, void 0, void 0, function* () { return yield this.addModificationChange(type, file, description, options); }),
-                getContextualSummary: () => __awaiter(this, void 0, void 0, function* () { return yield this.getModificationContextualSummary(); }),
-                getMostModifiedFiles: () => __awaiter(this, void 0, void 0, function* () { return yield this.getMostModifiedFiles(); })
-            };
+            const modificationSummary = yield this.getModificationSummary();
             return yield this.componentAdditionProcessor.handleComponentAddition(prompt, scope, projectFiles, modificationSummary, this.componentGenerationSystem, projectSummaryCallback);
         });
     }
-    // ==============================================================
-    // MODIFICATION HANDLERS - Compatible with your existing processors
-    // ==============================================================
     handleFullFileModification(prompt) {
         return __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c;
             const projectFiles = yield this.getProjectFiles();
+            const modificationSummary = yield this.getModificationSummary();
             try {
-                // Try different method names your processor might have
-                const processor = this.fullFileProcessor;
-                let result;
-                if (processor.processFullFileModification) {
-                    result = yield processor.processFullFileModification(prompt, projectFiles, this.reactBasePath, (message) => this.streamUpdate(message));
-                }
-                else if (processor.process) {
-                    result = yield processor.process(prompt, projectFiles, this.reactBasePath, (message) => this.streamUpdate(message));
-                }
-                else if (processor.handleFullFileModification) {
-                    result = yield processor.handleFullFileModification(prompt, projectFiles, this.reactBasePath, (message) => this.streamUpdate(message));
+                let result = false;
+                if (this.fullFileProcessor && 'handleFullFileModification' in this.fullFileProcessor &&
+                    typeof this.fullFileProcessor.handleFullFileModification === 'function') {
+                    result = yield this.fullFileProcessor.handleFullFileModification(prompt, projectFiles, modificationSummary);
                 }
                 else {
-                    console.warn('No suitable method found on FullFileProcessor');
+                    this.streamUpdate('⚠️ Using fallback full file modification method');
+                    this.streamUpdate('❌ Full file processor method not available - modification skipped');
                     return false;
                 }
                 if (result) {
-                    // Update project files in Redis if result contains updated files
-                    if (result.updatedProjectFiles) {
-                        yield this.setProjectFiles(result.updatedProjectFiles);
-                    }
-                    else if (result.projectFiles) {
-                        yield this.setProjectFiles(result.projectFiles);
-                    }
-                    // Add modification changes if available
-                    if (result.changes && Array.isArray(result.changes)) {
-                        for (const change of result.changes) {
-                            yield this.addModificationChange(change.type || 'modified', change.file, change.description || 'File modified', {
-                                approach: 'FULL_FILE',
-                                success: change.success !== false,
-                                linesChanged: (_a = change.details) === null || _a === void 0 ? void 0 : _a.linesChanged,
-                                componentsAffected: (_b = change.details) === null || _b === void 0 ? void 0 : _b.componentsAffected,
-                                reasoning: (_c = change.details) === null || _c === void 0 ? void 0 : _c.reasoning
-                            });
-                        }
-                    }
-                    return result.success !== false;
+                    yield this.setProjectFiles(projectFiles);
                 }
-                return false;
+                return result;
             }
             catch (error) {
-                console.error('Full file modification failed:', error);
+                this.streamUpdate(`❌ Full file modification failed: ${error}`);
                 return false;
             }
         });
     }
     handleTargetedModification(prompt) {
         return __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c;
             const projectFiles = yield this.getProjectFiles();
+            const modificationSummary = yield this.getModificationSummary();
             try {
-                // Try different method names your processor might have
-                const processor = this.targetedNodesProcessor;
-                let result;
-                if (processor.processTargetedModification) {
-                    result = yield processor.processTargetedModification(prompt, projectFiles, this.reactBasePath, (message) => this.streamUpdate(message));
-                }
-                else if (processor.process) {
-                    result = yield processor.process(prompt, projectFiles, this.reactBasePath, (message) => this.streamUpdate(message));
-                }
-                else if (processor.handleTargetedModification) {
-                    result = yield processor.handleTargetedModification(prompt, projectFiles, this.reactBasePath, (message) => this.streamUpdate(message));
+                let result = false;
+                if (this.targetedNodesProcessor && 'handleTargetedModification' in this.targetedNodesProcessor &&
+                    typeof this.targetedNodesProcessor.handleTargetedModification === 'function') {
+                    result = yield this.targetedNodesProcessor.handleTargetedModification(prompt, projectFiles, modificationSummary);
                 }
                 else {
-                    console.warn('No suitable method found on TargetedNodesProcessor');
+                    this.streamUpdate('⚠️ Using fallback targeted modification method');
+                    this.streamUpdate('❌ Targeted nodes processor method not available - modification skipped');
                     return false;
                 }
                 if (result) {
-                    // Update project files in Redis if result contains updated files
-                    if (result.updatedProjectFiles) {
-                        yield this.setProjectFiles(result.updatedProjectFiles);
-                    }
-                    else if (result.projectFiles) {
-                        yield this.setProjectFiles(result.projectFiles);
-                    }
-                    // Add modification changes if available
-                    if (result.changes && Array.isArray(result.changes)) {
-                        for (const change of result.changes) {
-                            yield this.addModificationChange(change.type || 'modified', change.file, change.description || 'File modified', {
-                                approach: 'TARGETED_NODES',
-                                success: change.success !== false,
-                                linesChanged: (_a = change.details) === null || _a === void 0 ? void 0 : _a.linesChanged,
-                                componentsAffected: (_b = change.details) === null || _b === void 0 ? void 0 : _b.componentsAffected,
-                                reasoning: (_c = change.details) === null || _c === void 0 ? void 0 : _c.reasoning
-                            });
-                        }
-                    }
-                    return result.success !== false;
+                    yield this.setProjectFiles(projectFiles);
                 }
-                return false;
+                return result;
             }
             catch (error) {
-                console.error('Targeted modification failed:', error);
+                this.streamUpdate(`❌ Targeted modification failed: ${error}`);
                 return false;
             }
         });
@@ -313,33 +308,43 @@ ${recentChanges.map(change => {
     processModification(prompt, conversationContext, dbSummary, projectSummaryCallback) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                this.streamUpdate('🚀 Starting STATELESS intelligent modification workflow...');
+                this.streamUpdate('🚀 Starting stateless intelligent modification workflow...');
                 yield this.initializeSession();
                 const projectFiles = yield this.getProjectFiles();
                 if (projectFiles.size === 0) {
                     return {
                         success: false,
-                        error: 'No React files found in project',
+                        error: 'No React files found in directory',
                         selectedFiles: [],
                         addedFiles: []
                     };
                 }
+                // Build project summary for scope analysis
                 const projectSummary = dbSummary || this.projectAnalyzer.buildProjectSummary(projectFiles);
                 const contextWithSummary = (conversationContext || '') + '\n\n' + (yield this.getModificationContextualSummary());
+                // Analyze scope
                 const scope = yield this.scopeAnalyzer.analyzeScope(prompt, projectSummary, contextWithSummary, dbSummary);
                 this.streamUpdate(`📋 Modification method: ${scope.scope}`);
+                // Prepare for component generation if needed
                 if (scope.scope === 'COMPONENT_ADDITION') {
-                    yield this.componentGenerationSystem.refreshFileStructure();
-                    if (dbSummary) {
+                    if (typeof this.componentGenerationSystem.refreshFileStructure === 'function') {
+                        yield this.componentGenerationSystem.refreshFileStructure();
+                    }
+                    if (dbSummary && typeof this.componentGenerationSystem.setProjectSummary === 'function') {
                         this.componentGenerationSystem.setProjectSummary(dbSummary);
                     }
                 }
+                // Execute the chosen approach
                 let success = false;
                 let selectedFiles = [];
                 let addedFiles = [];
                 switch (scope.scope) {
                     case 'COMPONENT_ADDITION':
                         const componentResult = yield this.handleComponentAddition(prompt, scope, projectSummaryCallback);
+                        // Write component addition changes to files
+                        if (componentResult.success) {
+                            yield this.writeChangesToFiles();
+                        }
                         return componentResult;
                     case 'FULL_FILE':
                         success = yield this.handleFullFileModification(prompt);
@@ -359,14 +364,19 @@ ${recentChanges.map(change => {
                             addedFiles: []
                         };
                 }
+                // Return results
                 if (success) {
+                    const modificationSummary = yield this.getModificationContextualSummary();
+                    // CRITICAL: Write Redis changes back to actual files
+                    yield this.writeChangesToFiles();
                     return {
                         success: true,
                         selectedFiles,
                         addedFiles,
                         approach: scope.scope,
-                        reasoning: `${scope.reasoning} Enhanced AST analysis identified ${selectedFiles.length} files for modification.`,
-                        modificationSummary: yield this.getModificationContextualSummary()
+                        reasoning: `${scope.reasoning} Stateless AST analysis identified ${selectedFiles.length} files for modification.`,
+                        modificationSummary,
+                        tokenUsage: this.tokenTracker.getStats()
                     };
                 }
                 else {
@@ -376,17 +386,19 @@ ${recentChanges.map(change => {
                         selectedFiles: [],
                         addedFiles: [],
                         approach: scope.scope,
-                        reasoning: scope.reasoning
+                        reasoning: scope.reasoning,
+                        tokenUsage: this.tokenTracker.getStats()
                     };
                 }
             }
             catch (error) {
-                console.error('❌ Modification process failed:', error);
+                console.error('❌ Stateless modification process failed:', error);
                 return {
                     success: false,
                     error: error instanceof Error ? error.message : 'Unknown error occurred',
                     selectedFiles: [],
-                    addedFiles: []
+                    addedFiles: [],
+                    tokenUsage: this.tokenTracker.getStats()
                 };
             }
         });
@@ -394,18 +406,127 @@ ${recentChanges.map(change => {
     // ==============================================================
     // UTILITY METHODS
     // ==============================================================
-    getChangeIcon(change) {
-        switch (change.type) {
-            case 'created': return '📝';
-            case 'modified': return '🔄';
-            case 'updated': return '⚡';
-            default: return '🔧';
-        }
-    }
-    getRedisStats() {
+    /**
+     * Write Redis cached changes back to actual files
+     */
+    writeChangesToFiles() {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.redis.getStats();
+            var _a;
+            this.streamUpdate('💾 Starting to write Redis cached changes back to actual files...');
+            this.streamUpdate(`📍 Base directory: ${this.reactBasePath}`);
+            try {
+                const projectFiles = yield this.getProjectFiles();
+                this.streamUpdate(`📦 Found ${projectFiles.size} files in Redis cache`);
+                if (projectFiles.size === 0) {
+                    this.streamUpdate('⚠️ No files found in Redis cache to write');
+                    return;
+                }
+                let filesWritten = 0;
+                let filesSkipped = 0;
+                for (const [relativePath, projectFile] of projectFiles.entries()) {
+                    this.streamUpdate(`\n🔍 Processing: ${relativePath}`);
+                    this.streamUpdate(`   Has content: ${!!projectFile.content}`);
+                    this.streamUpdate(`   Content length: ${((_a = projectFile.content) === null || _a === void 0 ? void 0 : _a.length) || 0}`);
+                    if (projectFile.content) {
+                        try {
+                            // CRITICAL FIX: Use current reactBasePath, not cached paths
+                            const currentFilePath = this.resolveCurrentFilePath(relativePath);
+                            // Debug: Log the path resolution
+                            this.streamUpdate(`🔧 Path resolution:`);
+                            this.streamUpdate(`   Input: ${relativePath}`);
+                            this.streamUpdate(`   Output: ${currentFilePath}`);
+                            this.streamUpdate(`   Base: ${this.reactBasePath}`);
+                            // Ensure directory exists
+                            const dir = path.dirname(currentFilePath);
+                            this.streamUpdate(`📁 Ensuring directory exists: ${dir}`);
+                            yield fs_1.promises.mkdir(dir, { recursive: true });
+                            // Check if target file already exists
+                            const existsBefore = yield fs_1.promises.access(currentFilePath).then(() => true).catch(() => false);
+                            this.streamUpdate(`   File exists before write: ${existsBefore}`);
+                            // Write the updated content to the actual file in current temp-build
+                            this.streamUpdate(`💾 Writing ${projectFile.content.length} characters to file...`);
+                            yield fs_1.promises.writeFile(currentFilePath, projectFile.content, 'utf8');
+                            // Verify the file was written
+                            const stats = yield fs_1.promises.stat(currentFilePath);
+                            const existsAfter = yield fs_1.promises.access(currentFilePath).then(() => true).catch(() => false);
+                            this.streamUpdate(`✅ SUCCESS: Written to ${currentFilePath}`);
+                            this.streamUpdate(`   File size: ${stats.size} bytes`);
+                            this.streamUpdate(`   Modified: ${stats.mtime}`);
+                            this.streamUpdate(`   Exists after write: ${existsAfter}`);
+                            filesWritten++;
+                        }
+                        catch (writeError) {
+                            this.streamUpdate(`❌ FAILED to write ${relativePath}:`);
+                            this.streamUpdate(`   Error: ${writeError}`);
+                            console.error(`Failed to write file ${relativePath}:`, writeError);
+                        }
+                    }
+                    else {
+                        this.streamUpdate(`⚠️ SKIPPED ${relativePath}: No content`);
+                        filesSkipped++;
+                    }
+                }
+                this.streamUpdate(`\n📊 Write Summary:`);
+                this.streamUpdate(`   Files written: ${filesWritten}`);
+                this.streamUpdate(`   Files skipped: ${filesSkipped}`);
+                this.streamUpdate(`   Total processed: ${projectFiles.size}`);
+                // Additional verification: List what's actually in the temp directory
+                try {
+                    this.streamUpdate(`\n🔍 Verifying temp directory structure:`);
+                    const srcPath = path.join(this.reactBasePath, 'src');
+                    const srcExists = yield fs_1.promises.access(srcPath).then(() => true).catch(() => false);
+                    this.streamUpdate(`   src/ exists: ${srcExists} at ${srcPath}`);
+                    if (srcExists) {
+                        const srcFiles = yield fs_1.promises.readdir(srcPath, { recursive: true });
+                        this.streamUpdate(`   Files in src/: ${srcFiles.length}`);
+                        this.streamUpdate(`   First 10 files: ${srcFiles.slice(0, 10).join(', ')}`);
+                        // Check specific modified files
+                        const modifiedFiles = ['pages/TodoApp.tsx', 'components/TodoFilters.tsx'];
+                        for (const file of modifiedFiles) {
+                            const filePath = path.join(srcPath, file);
+                            const exists = yield fs_1.promises.access(filePath).then(() => true).catch(() => false);
+                            if (exists) {
+                                const stats = yield fs_1.promises.stat(filePath);
+                                this.streamUpdate(`   ✅ ${file}: ${stats.size} bytes, modified ${stats.mtime}`);
+                            }
+                            else {
+                                this.streamUpdate(`   ❌ ${file}: NOT FOUND at ${filePath}`);
+                            }
+                        }
+                    }
+                    else {
+                        this.streamUpdate(`❌ src directory doesn't exist at: ${srcPath}`);
+                        // Check what's in the base directory
+                        const baseFiles = yield fs_1.promises.readdir(this.reactBasePath);
+                        this.streamUpdate(`   Files in base directory: ${baseFiles.join(', ')}`);
+                    }
+                }
+                catch (verifyError) {
+                    this.streamUpdate(`⚠️ Could not verify directory structure: ${verifyError}`);
+                }
+            }
+            catch (error) {
+                this.streamUpdate(`❌ Error writing changes to files: ${error}`);
+                console.error('Error writing changes to files:', error);
+                throw error;
+            }
         });
+    }
+    /**
+     * Resolve file path to current build directory
+     */
+    resolveCurrentFilePath(relativePath) {
+        // Clean the relative path and normalize separators
+        const cleanPath = relativePath.replace(/^[\/\\]+/, '').replace(/\\/g, '/');
+        // Handle different path patterns
+        if (cleanPath.startsWith('src/')) {
+            // Path already includes src, use directly
+            return path.join(this.reactBasePath, cleanPath);
+        }
+        else {
+            // Assume it's a file in src directory
+            return path.join(this.reactBasePath, 'src', cleanPath);
+        }
     }
     cleanup() {
         return __awaiter(this, void 0, void 0, function* () {

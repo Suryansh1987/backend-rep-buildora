@@ -785,6 +785,7 @@ ${newMessagesText}
   
 }
 
+
 // Extended class for integration with file modifier
 export class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFileModifier {
   protected messageDB: DrizzleMessageHistoryDB;
@@ -794,12 +795,11 @@ export class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFile
   reactBasePath: string,
   databaseUrl: string,
   sessionId: string,
-  redisUrl?: string
+  redisUrl?: string  
 ) {
   super(anthropic, reactBasePath, sessionId, redisUrl); 
   this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
 }
-
 
   // Initialize the database
   async initialize(): Promise<void> {

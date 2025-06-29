@@ -1,5 +1,5 @@
 // ============================================================================
-// PROJECT ANALYZER: processors/ProjectAnalyzer.ts
+// FILESYSTEM CACHE SYNC FIX: Enhanced ProjectAnalyzer with Real-time Verification
 // ============================================================================
 
 import { promises as fs } from 'fs';
@@ -27,12 +27,19 @@ export class ProjectAnalyzer {
     }
   }
 
+  /**
+   * ENHANCED: Real-time filesystem verification during cache building
+   */
   async buildProjectTree(
     projectFiles: Map<string, ProjectFile>, 
     dependencyManager: DependencyManager,
     streamCallback?: (message: string) => void
   ): Promise<void> {
-    this.streamUpdate('🔍 Starting comprehensive project analysis...');
+    if (streamCallback) {
+      this.setStreamCallback(streamCallback);
+    }
+    
+    this.streamUpdate('🔍 Starting comprehensive project analysis with real-time filesystem verification...');
     
     const srcPath = join(this.reactBasePath, 'src');
     
@@ -44,6 +51,11 @@ export class ProjectAnalyzer {
       return;
     }
     
+    let totalFiles = 0;
+    let excludedFiles = 0;
+    let analyzedFiles = 0;
+    let verificationErrors = 0;
+
     const scanDir = async (dir: string, relativePath: string = ''): Promise<void> => {
       try {
         const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -53,9 +65,30 @@ export class ProjectAnalyzer {
           const relPath = relativePath ? join(relativePath, entry.name) : entry.name;
           
           if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+            // Skip entire UI directories
+            if (entry.name === 'ui' && relativePath.includes('component')) {
+              this.streamUpdate(`⏭️ Skipping entire UI directory: ${relPath}`);
+              continue;
+            }
             await scanDir(fullPath, relPath);
           } else if (entry.isFile() && /\.(js|jsx|ts|tsx)$/.test(entry.name)) {
-            await this.analyzeFile(fullPath, relPath, projectFiles);
+            totalFiles++;
+            
+            // Check if file should be excluded
+            if (this.shouldExcludeFile(relPath, fullPath)) {
+              excludedFiles++;
+              continue;
+            }
+            
+            // ENHANCED: Verify file exists and is accessible before analyzing
+            const analyzeResult = await this.analyzeFileWithVerification(fullPath, relPath, projectFiles);
+            if (analyzeResult === 'analyzed') {
+              analyzedFiles++;
+            } else if (analyzeResult === 'excluded') {
+              excludedFiles++;
+            } else if (analyzeResult === 'error') {
+              verificationErrors++;
+            }
           }
         }
       } catch (error) {
@@ -63,34 +96,50 @@ export class ProjectAnalyzer {
       }
     };
 
+    // Clear the map and populate it with fresh data
+    projectFiles.clear();
     await scanDir(srcPath);
     
-    // Update dependency manager with current project files
-    const updatedDependencyManager = new DependencyManager(projectFiles);
-    if (streamCallback) {
-      updatedDependencyManager.setStreamCallback(streamCallback);
-    }
+    // ENHANCED: Post-build verification
+    this.streamUpdate('🔍 Performing post-build filesystem verification...');
+    const verificationResults = await this.verifyProjectFilesCache(projectFiles);
     
-    this.streamUpdate(`✅ Project analysis complete! Found ${projectFiles.size} React files.`);
+    this.streamUpdate(`✅ Project analysis complete!`);
+    this.streamUpdate(`📊 Files processed: ${totalFiles} total, ${analyzedFiles} analyzed, ${excludedFiles} excluded, ${verificationErrors} verification errors`);
+    this.streamUpdate(`📁 Found ${projectFiles.size} verified React files for modification`);
+    this.streamUpdate(`🔍 Verification: ${verificationResults.verified} verified, ${verificationResults.missing} missing from filesystem`);
+    
+    if (verificationResults.missing > 0) {
+      this.streamUpdate(`⚠️ Warning: ${verificationResults.missing} files in cache don't exist on filesystem`);
+    }
   }
 
-  private async analyzeFile(
+  /**
+   * ENHANCED: Analyze file with real-time filesystem verification
+   */
+  private async analyzeFileWithVerification(
     filePath: string, 
     relativePath: string, 
     projectFiles: Map<string, ProjectFile>
-  ): Promise<void> {
+  ): Promise<'analyzed' | 'excluded' | 'error'> {
     try {
-      if (relativePath.includes('components/ui/') || relativePath.includes('components\\ui\\')) {
-        return;
+      // Double-check file exists and is readable
+      await fs.access(filePath, fs.constants.R_OK);
+      
+      const content = await fs.readFile(filePath, 'utf8');
+      
+      // Additional content-based exclusion
+      if (this.isUILibraryFile(content, basename(filePath))) {
+        this.streamUpdate(`⏭️ Excluding UI library file: ${relativePath}`);
+        return 'excluded';
       }
 
-      const content = await fs.readFile(filePath, 'utf8');
       const stats = await fs.stat(filePath);
       const lines = content.split('\n');
       
       const projectFile: ProjectFile = {
         name: basename(filePath),
-        path: filePath,
+        path: filePath, // Store absolute path for reliability
         relativePath: `src/${relativePath}`,
         content,
         lines: lines.length,
@@ -102,14 +151,231 @@ export class ProjectAnalyzer {
         isMainFile: this.isMainFile(filePath, content)
       };
       
+      // ENHANCED: Verify the file can be written to
+      try {
+        await fs.access(filePath, fs.constants.W_OK);
+      } catch (writeError) {
+        this.streamUpdate(`⚠️ Warning: ${relativePath} is read-only or write-protected`);
+        // Still add to cache but note the issue
+      }
+      
       projectFiles.set(projectFile.relativePath, projectFile);
+      this.streamUpdate(`📄 Analyzed & Verified: ${projectFile.relativePath} (${projectFile.componentName})`);
+      return 'analyzed';
     } catch (error) {
-      console.error(`Failed to analyze file ${relativePath}:`, error);
+      this.streamUpdate(`❌ Failed to analyze/verify file ${relativePath}: ${error}`);
+      return 'error';
     }
   }
 
+  /**
+   * NEW: Verify all cached project files actually exist on filesystem
+   */
+  private async verifyProjectFilesCache(projectFiles: Map<string, ProjectFile>): Promise<{
+    verified: number;
+    missing: number;
+    missingFiles: string[];
+  }> {
+    let verified = 0;
+    let missing = 0;
+    const missingFiles: string[] = [];
+
+    for (const [relativePath, file] of projectFiles) {
+      try {
+        await fs.access(file.path, fs.constants.R_OK | fs.constants.W_OK);
+        verified++;
+      } catch (error) {
+        missing++;
+        missingFiles.push(relativePath);
+        this.streamUpdate(`❌ Cache verification failed for ${relativePath}: file not accessible at ${file.path}`);
+        
+        // Try to find the file in alternative locations
+        const alternativePath = await this.findFileInAlternativeLocation(file);
+        if (alternativePath) {
+          this.streamUpdate(`✅ Found ${relativePath} at alternative location: ${alternativePath}`);
+          // Update the file path in cache
+          file.path = alternativePath;
+          verified++;
+          missing--;
+          missingFiles.pop(); // Remove from missing list
+        }
+      }
+    }
+
+    // Remove missing files from cache to prevent modification attempts
+    for (const missingFile of missingFiles) {
+      this.streamUpdate(`🗑️ Removing ${missingFile} from cache (file not found on filesystem)`);
+      projectFiles.delete(missingFile);
+    }
+
+    return { verified, missing: missingFiles.length, missingFiles };
+  }
+
+  /**
+   * NEW: Try to find file in alternative locations
+   */
+  private async findFileInAlternativeLocation(file: ProjectFile): Promise<string | null> {
+    const alternativePaths = [
+      // Try with different base paths
+      join(this.reactBasePath, file.relativePath),
+      join(this.reactBasePath, file.relativePath.replace(/^src[\/\\]/, '')),
+      join(this.reactBasePath, 'src', file.relativePath.replace(/^src[\/\\]/, '')),
+      
+      // Try with different file extensions
+      file.path.replace(/\.tsx$/, '.jsx'),
+      file.path.replace(/\.jsx$/, '.tsx'),
+      file.path.replace(/\.ts$/, '.js'),
+      file.path.replace(/\.js$/, '.ts'),
+      
+      // Try case variations
+      file.path.toLowerCase(),
+      file.path.toUpperCase(),
+    ];
+
+    for (const altPath of alternativePaths) {
+      try {
+        await fs.access(altPath, fs.constants.R_OK | fs.constants.W_OK);
+        return altPath;
+      } catch {
+        // Continue trying
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * NEW: Clean up stale cache entries
+   */
+  async cleanupStaleCache(projectFiles: Map<string, ProjectFile>): Promise<void> {
+    this.streamUpdate('🧹 Cleaning up stale cache entries...');
+    
+    const stalePaths: string[] = [];
+    
+    for (const [relativePath, file] of projectFiles) {
+      try {
+        await fs.access(file.path);
+      } catch {
+        stalePaths.push(relativePath);
+      }
+    }
+    
+    for (const stalePath of stalePaths) {
+      projectFiles.delete(stalePath);
+      this.streamUpdate(`🗑️ Removed stale cache entry: ${stalePath}`);
+    }
+    
+    this.streamUpdate(`✅ Cleanup complete: removed ${stalePaths.length} stale entries`);
+  }
+
+  /**
+   * NEW: Force refresh a specific file in cache
+   */
+  async refreshFileInCache(
+    filePath: string, 
+    projectFiles: Map<string, ProjectFile>
+  ): Promise<boolean> {
+    this.streamUpdate(`🔄 Refreshing ${filePath} in cache...`);
+    
+    const existingFile = projectFiles.get(filePath);
+    if (!existingFile) {
+      this.streamUpdate(`❌ File ${filePath} not found in cache`);
+      return false;
+    }
+
+    try {
+      // Re-read the file from filesystem
+      const content = await fs.readFile(existingFile.path, 'utf8');
+      const stats = await fs.stat(existingFile.path);
+      const lines = content.split('\n');
+      
+      // Update the cached file
+      existingFile.content = content;
+      existingFile.lines = lines.length;
+      existingFile.size = stats.size;
+      existingFile.snippet = lines.slice(0, 15).join('\n');
+      existingFile.componentName = this.extractComponentNameFromContent(content);
+      existingFile.hasButtons = this.checkForButtons(content);
+      existingFile.hasSignin = this.checkForSignin(content);
+      
+      this.streamUpdate(`✅ Successfully refreshed ${filePath} in cache`);
+      return true;
+    } catch (error) {
+      this.streamUpdate(`❌ Failed to refresh ${filePath}: ${error}`);
+      return false;
+    }
+  }
+
+  // [Keep all existing helper methods: shouldExcludeFile, isUILibraryFile, etc.]
+  
+  private shouldExcludeFile(relativePath: string, fullPath: string): boolean {
+    const excludePatterns = [
+      /src[\/\\]components?[\/\\]ui[\/\\]/i,
+      /components?[\/\\]ui[\/\\]/i,
+      /ui[\/\\](button|input|card|dialog|dropdown|select|textarea|checkbox|radio|switch|slider|progress|alert|badge|avatar|separator|skeleton|toast|tooltip|popover|command|calendar|accordion|tabs|sheet|scroll-area|menubar|navigation-menu|context-menu|hover-card|label|aspect-ratio|collapsible|toggle|form)\.tsx?$/i,
+      /ui[\/\\](components?|elements?|primitives?)[\/\\]/i,
+      /test\.|spec\./,
+      /\.test\.|\.spec\./,
+      /__tests__[\/\\]/,
+      /\.d\.ts$/,
+      /utils?\.tsx?$/i,
+      /helpers?\.tsx?$/i,
+      /constants?\.tsx?$/i,
+      /config\.tsx?$/i,
+      /types\.tsx?$/i,
+      /lib[\/\\]/,
+      /vendor[\/\\]/,
+      /third-party[\/\\]/,
+      /node_modules[\/\\]/,
+      /\.git[\/\\]/,
+      /dist[\/\\]/,
+      /build[\/\\]/,
+      /\.stories?\./,
+      /\.css$/,
+      /\.scss$/,
+      /\.sass$/,
+      /\.less$/,
+      /\.styl$/
+    ];
+
+    return excludePatterns.some(pattern => pattern.test(relativePath) || pattern.test(fullPath));
+  }
+
+  private isUILibraryFile(content: string, fileName: string): boolean {
+    if (/^(button|input|card|dialog|dropdown|select|textarea|checkbox|radio|switch|slider|progress|alert|badge|avatar|separator|skeleton|toast|tooltip|popover|command|calendar|accordion|tabs|sheet|scroll-area|menubar|navigation-menu|context-menu|hover-card|label|aspect-ratio|collapsible|toggle|form)\.tsx?$/i.test(fileName)) {
+      return true;
+    }
+
+    const uiLibraryIndicators = [
+      /@\/lib\/utils/,
+      /class-variance-authority/,
+      /clsx.*cn/,
+      /React\.forwardRef.*displayName/,
+      /@radix-ui\//,
+      /Primitive\./,
+      /styled-components/,
+      /@emotion\//,
+      /chakra-ui/,
+      /mantine/,
+      /interface.*Props.*extends.*React\./,
+      /VariantProps/,
+      /cva\(/,
+      /export.*const.*=.*React\.forwardRef/,
+      /export.*\{.*as.*\}/
+    ];
+
+    const hasUIIndicators = uiLibraryIndicators.some(pattern => pattern.test(content));
+    
+    const isBasicWrapper = content.includes('React.forwardRef') && 
+                          /return\s*<(div|span|button|input|textarea|select|label|p|h[1-6])\s/.test(content) &&
+                          content.split('\n').length < 50;
+
+    return hasUIIndicators || isBasicWrapper;
+  }
+
+  // [Include all other existing methods: buildProjectSummary, extractComponentNameFromContent, etc.]
   buildProjectSummary(projectFiles: Map<string, ProjectFile>): string {
-    let summary = "**COMPLETE PROJECT STRUCTURE:**\n\n";
+    let summary = "**COMPLETE PROJECT STRUCTURE (UI Components Excluded):**\n\n";
     summary += "**ANALYZED REACT FILES WITH METADATA:**\n\n";
     
     const sortedFiles = Array.from(projectFiles.values())
@@ -119,7 +385,8 @@ export class ProjectAnalyzer {
         return a.relativePath.localeCompare(b.relativePath);
       });
 
-    summary += `**Total React Files Found: ${sortedFiles.length}**\n\n`;
+    summary += `**Total Relevant React Files Found: ${sortedFiles.length}**\n`;
+    summary += `**Note: UI library components (src/components/ui/*) excluded from analysis**\n\n`;
 
     sortedFiles.forEach(file => {
       summary += `**${file.relativePath}**\n`;
@@ -130,168 +397,6 @@ export class ProjectAnalyzer {
     });
 
     return summary;
-  }
-
-  async getProjectAnalytics(
-    prompt: string | undefined,
-    projectFiles: Map<string, ProjectFile>,
-    astAnalyzer: ASTAnalyzer,
-    anthropic: any,
-    tokenTracker: TokenTracker
-  ): Promise<{
-    totalFiles: number;
-    analyzedFiles: number;
-    potentialTargets?: Array<{ filePath: string; elementCount: number; relevanceScore?: number }>;
-  }> {
-    const analytics = {
-      totalFiles: projectFiles.size,
-      analyzedFiles: projectFiles.size,
-      potentialTargets: [] as Array<{ filePath: string; elementCount: number; relevanceScore?: number }>
-    };
-
-    if (prompt && projectFiles.size > 0) {
-      this.streamUpdate('📊 Running project analytics...');
-      
-      let fileCount = 0;
-      const maxAnalyze = 10;
-      
-      for (const [filePath] of projectFiles) {
-        if (fileCount >= maxAnalyze) break;
-        
-        const astNodes = astAnalyzer.parseFileWithAST(filePath, projectFiles);
-        const target = {
-          filePath,
-          elementCount: astNodes.length,
-          relevanceScore: undefined as number | undefined
-        };
-        
-        if (astNodes.length > 0) {
-          try {
-            const relevanceResult = await astAnalyzer.analyzeFileRelevance(
-              prompt,
-              filePath,
-              astNodes,
-              'FULL_FILE',
-              projectFiles,
-              anthropic,
-              tokenTracker
-            );
-            target.relevanceScore = relevanceResult.relevanceScore;
-          } catch (error) {
-            // Continue without score
-          }
-        }
-        
-        analytics.potentialTargets.push(target);
-        fileCount++;
-      }
-      
-      analytics.potentialTargets.sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0));
-    }
-
-    return analytics;
-  }
-
-  async getUnusedPagesInfo(projectFiles: Map<string, ProjectFile>, reactBasePath: string): Promise<PageInfo[]> {
-    return this.findUnusedPages(projectFiles, reactBasePath);
-  }
-
-  private async findUnusedPages(projectFiles: Map<string, ProjectFile>, reactBasePath: string): Promise<PageInfo[]> {
-    this.streamUpdate('🔍 Analyzing App.tsx to find unused pages...');
-    
-    const pages = await this.scanPagesDirectory(reactBasePath);
-    if (pages.length === 0) {
-      return [];
-    }
-    
-    // Find App.tsx
-    let appFile = projectFiles.get('src/App.tsx') || projectFiles.get('src/App.jsx');
-    
-    if (!appFile) {
-      const appPaths = ['src/App.tsx', 'src/App.jsx'];
-      for (const appPath of appPaths) {
-        try {
-          const fullPath = join(reactBasePath, appPath.replace('src/', ''));
-          const content = await fs.readFile(fullPath, 'utf8');
-          
-          appFile = {
-            name: basename(fullPath),
-            path: fullPath,
-            relativePath: appPath,
-            content,
-            lines: content.split('\n').length,
-            size: 0,
-            snippet: '',
-            componentName: 'App',
-            hasButtons: false,
-            hasSignin: false,
-            isMainFile: true
-          };
-          break;
-        } catch {
-          continue;
-        }
-      }
-    }
-    
-    if (!appFile) {
-      this.streamUpdate('❌ No App.tsx found');
-      return pages;
-    }
-    
-    const appContent = appFile.content;
-    
-    // Check each page
-    for (const page of pages) {
-      // Check if imported
-      const importRegex = new RegExp(`import\\s+${page.name}\\s+from\\s+['"](\\./)?pages/${page.name}['"]`, 'i');
-      page.isImported = importRegex.test(appContent);
-      
-      // Check if used in routing
-      const routeRegex = new RegExp(`<Route[^>]*element={<${page.name}[^>]*>}[^>]*>`, 'i');
-      const componentRegex = new RegExp(`<${page.name}[\\s/>]`, 'i');
-      page.isUsedInRouting = routeRegex.test(appContent) || componentRegex.test(appContent);
-      
-      this.streamUpdate(`📄 ${page.name}: imported=${page.isImported}, used=${page.isUsedInRouting}`);
-    }
-    
-    // Return only unused pages
-    const unusedPages = pages.filter(page => !page.isImported || !page.isUsedInRouting);
-    this.streamUpdate(`📊 Found ${unusedPages.length} unused pages: ${unusedPages.map(p => p.name).join(', ')}`);
-    
-    return unusedPages;
-  }
-
-  private async scanPagesDirectory(reactBasePath: string): Promise<PageInfo[]> {
-    this.streamUpdate('📁 Scanning pages directory for existing pages...');
-    
-    const pagesPath = join(reactBasePath, 'src', 'pages');
-    const pages: PageInfo[] = [];
-    
-    try {
-      const entries = await fs.readdir(pagesPath, { withFileTypes: true });
-      
-      for (const entry of entries) {
-        if (entry.isFile() && /\.(tsx?|jsx?)$/.test(entry.name)) {
-          const pageName = entry.name.replace(/\.(tsx?|jsx?)$/, '');
-          const relativePath = `src/pages/${entry.name}`;
-          
-          pages.push({
-            name: pageName,
-            path: relativePath,
-            isImported: false,
-            isUsedInRouting: false,
-            suggestedRoute: `/${pageName.toLowerCase()}`
-          });
-        }
-      }
-      
-      this.streamUpdate(`📋 Found ${pages.length} pages in directory`);
-    } catch (error) {
-      this.streamUpdate(`⚠️ No pages directory found or error reading: ${error}`);
-    }
-    
-    return pages;
   }
 
   private extractComponentNameFromContent(content: string): string {

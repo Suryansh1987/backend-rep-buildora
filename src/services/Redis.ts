@@ -1,12 +1,10 @@
-// services/redis.ts
+// services/redis.ts - FIXED VERSION WITH PROPER TYPE COMPATIBILITY
 import Redis from 'ioredis';
 import { ProjectFile, ASTNode, ModificationChange } from './filemodifier/types';
-const validTypes = ['modified', 'created', 'updated'] as const;
-type ValidChangeType = typeof validTypes[number]; // "modified" | "created" | "updated"
 
-type SafeModificationChange = Omit<ModificationChange, 'type'> & {
-  type: ValidChangeType;
-};
+// FIXED: Ensure type compatibility for ModificationChange
+type SafeModificationChange = ModificationChange;
+
 export class RedisService {
   private redis: Redis;
   private readonly DEFAULT_TTL = 3600; // 1 hour
@@ -19,7 +17,6 @@ export class RedisService {
       lazyConnect: true,
       maxRetriesPerRequest: 3,
     });
-  
 
     this.redis.on('error', (err) => {
       console.error('Redis connection error:', err);
@@ -31,7 +28,7 @@ export class RedisService {
   }
 
   // ==============================================================
-  // PROJECT FILES CACHE METHODS
+  // PROJECT FILES CACHE METHODS - FIXED
   // ==============================================================
 
   /**
@@ -39,12 +36,33 @@ export class RedisService {
    */
   async setProjectFiles(sessionId: string, projectFiles: Map<string, ProjectFile>): Promise<void> {
     const key = `project_files:${sessionId}`;
-    const data = JSON.stringify(Object.fromEntries(projectFiles));
+    
+    // FIXED: Better serialization handling
+    const serializedData: Record<string, any> = {};
+    for (const [filePath, file] of projectFiles.entries()) {
+      serializedData[filePath] = {
+        ...file,
+        // Ensure all required fields are present
+        name: file.name || '',
+        path: file.path || '',
+        relativePath: file.relativePath || '',
+        content: file.content || '',
+        lines: file.lines || 0,
+        size: file.size || 0,
+        snippet: file.snippet || '',
+        componentName: file.componentName || null,
+        hasButtons: file.hasButtons || false,
+        hasSignin: file.hasSignin || false,
+        isMainFile: file.isMainFile || false
+      };
+    }
+    
+    const data = JSON.stringify(serializedData);
     await this.redis.setex(key, this.PROJECT_FILES_TTL, data);
   }
 
   /**
-   * Get project files map for a session
+   * Get project files map for a session - FIXED
    */
   async getProjectFiles(sessionId: string): Promise<Map<string, ProjectFile> | null> {
     const key = `project_files:${sessionId}`;
@@ -54,7 +72,28 @@ export class RedisService {
     
     try {
       const parsed = JSON.parse(data);
-      return new Map(Object.entries(parsed));
+      const projectFiles = new Map<string, ProjectFile>();
+      
+      // FIXED: Proper reconstruction of ProjectFile objects
+      for (const [filePath, fileData] of Object.entries(parsed)) {
+        const file = fileData as any;
+        const projectFile: ProjectFile = {
+          name: file.name || '',
+          path: file.path || '',
+          relativePath: file.relativePath || '',
+          content: file.content || '',
+          lines: file.lines || 0,
+          size: file.size || 0,
+          snippet: file.snippet || '',
+          componentName: file.componentName || null,
+          hasButtons: Boolean(file.hasButtons),
+          hasSignin: Boolean(file.hasSignin),
+          isMainFile: Boolean(file.isMainFile)
+        };
+        projectFiles.set(filePath, projectFile);
+      }
+      
+      return projectFiles;
     } catch (error) {
       console.error('Error parsing project files from Redis:', error);
       return null;
@@ -70,13 +109,13 @@ export class RedisService {
   }
 
   /**
-   * Add or update a single project file
+   * Add or update a single project file - FIXED
    */
   async updateProjectFile(sessionId: string, filePath: string, projectFile: ProjectFile): Promise<void> {
     const key = `project_files:${sessionId}`;
     const existingData = await this.redis.get(key);
     
-    let projectFiles: Record<string, ProjectFile> = {};
+    let projectFiles: Record<string, any> = {};
     if (existingData) {
       try {
         projectFiles = JSON.parse(existingData);
@@ -85,12 +124,26 @@ export class RedisService {
       }
     }
     
-    projectFiles[filePath] = projectFile;
+    // FIXED: Ensure proper serialization
+    projectFiles[filePath] = {
+      name: projectFile.name || '',
+      path: projectFile.path || '',
+      relativePath: projectFile.relativePath || '',
+      content: projectFile.content || '',
+      lines: projectFile.lines || 0,
+      size: projectFile.size || 0,
+      snippet: projectFile.snippet || '',
+      componentName: projectFile.componentName || null,
+      hasButtons: Boolean(projectFile.hasButtons),
+      hasSignin: Boolean(projectFile.hasSignin),
+      isMainFile: Boolean(projectFile.isMainFile)
+    };
+    
     await this.redis.setex(key, this.PROJECT_FILES_TTL, JSON.stringify(projectFiles));
   }
 
   // ==============================================================
-  // MODIFICATION SUMMARY METHODS
+  // MODIFICATION SUMMARY METHODS - FIXED
   // ==============================================================
 
   /**
@@ -98,11 +151,27 @@ export class RedisService {
    */
   async setModificationChanges(sessionId: string, changes: ModificationChange[]): Promise<void> {
     const key = `mod_changes:${sessionId}`;
-    await this.redis.setex(key, this.SESSION_TTL, JSON.stringify(changes));
+    
+    // FIXED: Ensure proper serialization of changes
+    const serializedChanges = changes.map(change => ({
+      type: change.type,
+      file: change.file,
+      description: change.description,
+      timestamp: change.timestamp,
+      approach: change.approach || undefined,
+      success: change.success !== undefined ? Boolean(change.success) : undefined,
+      details: change.details ? {
+        linesChanged: change.details.linesChanged || undefined,
+        componentsAffected: change.details.componentsAffected || undefined,
+        reasoning: change.details.reasoning || undefined
+      } : undefined
+    }));
+    
+    await this.redis.setex(key, this.SESSION_TTL, JSON.stringify(serializedChanges));
   }
 
   /**
-   * Get modification changes for a session
+   * Get modification changes for a session - FIXED
    */
   async getModificationChanges(sessionId: string): Promise<ModificationChange[]> {
     const key = `mod_changes:${sessionId}`;
@@ -111,7 +180,22 @@ export class RedisService {
     if (!data) return [];
     
     try {
-      return JSON.parse(data);
+      const parsed = JSON.parse(data);
+      
+      // FIXED: Proper reconstruction of ModificationChange objects
+      return parsed.map((change: any): ModificationChange => ({
+        type: change.type,
+        file: change.file,
+        description: change.description,
+        timestamp: change.timestamp,
+        approach: change.approach || undefined,
+        success: change.success !== undefined ? Boolean(change.success) : undefined,
+        details: change.details ? {
+          linesChanged: change.details.linesChanged || undefined,
+          componentsAffected: change.details.componentsAffected || undefined,
+          reasoning: change.details.reasoning || undefined
+        } : undefined
+      }));
     } catch (error) {
       console.error('Error parsing modification changes from Redis:', error);
       return [];
@@ -119,17 +203,13 @@ export class RedisService {
   }
 
   /**
-   * Add a single modification change
+   * Add a single modification change - FIXED TYPE COMPATIBILITY
    */
-
-
-async addModificationChange(sessionId: string, change: SafeModificationChange): Promise<void> {
-  const existing = await this.getModificationChanges(sessionId);
-  existing.push(change);
-  await this.setModificationChanges(sessionId, existing);
-}
-
-
+  async addModificationChange(sessionId: string, change: SafeModificationChange): Promise<void> {
+    const existing = await this.getModificationChanges(sessionId);
+    existing.push(change);
+    await this.setModificationChanges(sessionId, existing);
+  }
 
   /**
    * Set session start time
@@ -296,34 +376,32 @@ async addModificationChange(sessionId: string, change: SafeModificationChange): 
   }
 
   /**
-   * Get memory usage stats
+   * Get memory usage stats - FIXED
    */
-async getStats(): Promise<{
-  memoryUsage: string | null;
-  keyCount: number;
-  connected: boolean;
-  error?: string;
-}> {
-  try {
-    const info = await this.redis.call('info', 'memory') as string;
-    const keyCount = await this.redis.dbsize();
+  async getStats(): Promise<{
+    memoryUsage: string | null;
+    keyCount: number;
+    connected: boolean;
+    error?: string;
+  }> {
+    try {
+      const info = await this.redis.call('info', 'memory') as string;
+      const keyCount = await this.redis.dbsize();
 
-    return {
-      memoryUsage: info,
-      keyCount,
-      connected: true
-    };
-  } catch (error) {
-    return {
-      memoryUsage: null,
-      keyCount: 0,
-      connected: false,
-      error: (error as Error).message
-    };
+      return {
+        memoryUsage: info,
+        keyCount,
+        connected: true
+      };
+    } catch (error) {
+      return {
+        memoryUsage: null,
+        keyCount: 0,
+        connected: false,
+        error: (error as Error).message
+      };
+    }
   }
-}
-
-
 
   /**
    * Close Redis connection

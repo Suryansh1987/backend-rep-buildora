@@ -1,4 +1,4 @@
-// routes/modification.ts - File modification routes
+// routes/modification.ts - FIXED File modification routes
 import express, { Request, Response } from "express";
 import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 import { StatelessSessionManager } from './session';
@@ -16,7 +16,6 @@ import {
   deployToSWA,
 } from "../services/azure-deploy";
 import Anthropic from "@anthropic-ai/sdk";
-
 
 const router = express.Router();
 
@@ -356,7 +355,7 @@ export function initializeModificationRoutes(
         });
       }
 
-      // Initialize stateless file modifier
+      // Initialize stateless file modifier - FIXED CONSTRUCTOR
       const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
       
       fileModifier.setStreamCallback((message: string) => {
@@ -402,10 +401,40 @@ export function initializeModificationRoutes(
         sendEvent('progress', { 
           step: 9, 
           total: 15, 
-          message: `Stateless modification completed successfully in ${modificationDuration}ms! Applied ${result.approach} approach. Starting build & deploy pipeline...`,
+          message: `Stateless modification completed successfully in ${modificationDuration}ms! Applied ${result.approach} approach. Writing changes to files...`,
           buildId: buildId,
           sessionId: sessionId
         });
+
+        // CRITICAL: Ensure changes are written to actual files before build
+        try {
+          sendEvent('progress', { 
+            step: 9.5, 
+            total: 15, 
+            message: 'Ensuring all Redis changes are written to temp files...',
+            buildId: buildId,
+            sessionId: sessionId
+          });
+          // The fileModifier.writeChangesToFiles() is already called inside processModification
+          sendEvent('progress', { 
+            step: 9.7, 
+            total: 15, 
+            message: 'All changes written to temp files successfully',
+            buildId: buildId,
+            sessionId: sessionId
+          });
+        } catch (writeError) {
+          console.error('Failed to write changes to files:', writeError);
+          sendEvent('error', {
+            success: false,
+            error: 'Failed to write modifications to files',
+            //@ts-ignore
+            details: writeError.message,
+            buildId: buildId,
+            sessionId: sessionId
+          });
+          return;
+        }
 
         // Save modification
         try {
@@ -426,10 +455,43 @@ export function initializeModificationRoutes(
           sendEvent('progress', { 
             step: 10, 
             total: 15, 
-            message: 'Creating deployment package with all stateless modifications...',
+            message: 'Starting build & deploy pipeline with written changes...',
             buildId: buildId,
             sessionId: sessionId
           });
+
+          // DEBUG: Check what files exist in tempBuildDir before zipping
+          console.log(`[${buildId}] DEBUG: Checking temp directory contents AFTER modification...`);
+          const files = await fs.promises.readdir(tempBuildDir, { recursive: true });
+          console.log(`[${buildId}] Files in temp directory:`, files.slice(0, 20));
+          
+          // Check if React files were actually modified
+          const srcDir = path.join(tempBuildDir, 'src');
+          if (await fs.promises.access(srcDir).then(() => true).catch(() => false)) {
+            const srcFiles = await fs.promises.readdir(srcDir, { recursive: true });
+            console.log(`[${buildId}] React files in src/:`, srcFiles);
+            
+            // Check timestamps of modified files
+            for (const file of srcFiles.slice(0, 5)) {
+              const filePath = path.join(srcDir, file);
+              try {
+                const stats = await fs.promises.stat(filePath);
+                console.log(`[${buildId}] ${file} modified: ${stats.mtime}`);
+              } catch (e) {
+                //@ts-ignore
+                console.log(`[${buildId}] Could not check ${file}:`, e.message);
+              }
+            }
+          }
+          
+          // Check for package.json
+          const packageJsonPath = path.join(tempBuildDir, 'package.json');
+          try {
+            const packageJson = JSON.parse(await fs.promises.readFile(packageJsonPath, 'utf8'));
+            console.log(`[${buildId}] Package.json found with dependencies:`, Object.keys(packageJson.dependencies || {}));
+          } catch {
+            console.log(`[${buildId}] ❌ No package.json found at: ${packageJsonPath}`);
+          }
 
           const zip = new AdmZip();
           zip.addLocalFolder(tempBuildDir);
@@ -690,7 +752,7 @@ export function initializeModificationRoutes(
           console.error('Context loading error:', contextError);
         }
 
-        // Initialize stateless file modifier with Redis session backing
+        // Initialize stateless file modifier - FIXED CONSTRUCTOR
         const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
         
         // Start timing
@@ -733,6 +795,20 @@ export function initializeModificationRoutes(
           // BUILD & DEPLOY PIPELINE
           try {
             console.log(`[${buildId}] Starting build pipeline after successful stateless modification...`);
+            
+            // DEBUG: Check what files exist in tempBuildDir before zipping
+            console.log(`[${buildId}] DEBUG: Checking temp directory contents...`);
+            const files = await fs.promises.readdir(tempBuildDir, { recursive: true });
+            console.log(`[${buildId}] Files in temp directory:`, files.slice(0, 20));
+            
+            // Check for package.json
+            const packageJsonPath = path.join(tempBuildDir, 'package.json');
+            try {
+              const packageJson = JSON.parse(await fs.promises.readFile(packageJsonPath, 'utf8'));
+              console.log(`[${buildId}] Package.json found with dependencies:`, Object.keys(packageJson.dependencies || {}));
+            } catch {
+              console.log(`[${buildId}] ❌ No package.json found at: ${packageJsonPath}`);
+            }
             
             // Create zip and upload to Azure
             const zip = new AdmZip();

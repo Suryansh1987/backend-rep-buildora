@@ -1,9 +1,5 @@
 import { ProjectFile, ASTNode, ModificationChange } from './filemodifier/types';
-declare const validTypes: readonly ["modified", "created", "updated"];
-type ValidChangeType = typeof validTypes[number];
-type SafeModificationChange = Omit<ModificationChange, 'type'> & {
-    type: ValidChangeType;
-};
+type SafeModificationChange = ModificationChange;
 export declare class RedisService {
     private redis;
     private readonly DEFAULT_TTL;
@@ -15,7 +11,7 @@ export declare class RedisService {
      */
     setProjectFiles(sessionId: string, projectFiles: Map<string, ProjectFile>): Promise<void>;
     /**
-     * Get project files map for a session
+     * Get project files map for a session - FIXED
      */
     getProjectFiles(sessionId: string): Promise<Map<string, ProjectFile> | null>;
     /**
@@ -23,7 +19,7 @@ export declare class RedisService {
      */
     hasProjectFiles(sessionId: string): Promise<boolean>;
     /**
-     * Add or update a single project file
+     * Add or update a single project file - FIXED
      */
     updateProjectFile(sessionId: string, filePath: string, projectFile: ProjectFile): Promise<void>;
     /**
@@ -31,11 +27,11 @@ export declare class RedisService {
      */
     setModificationChanges(sessionId: string, changes: ModificationChange[]): Promise<void>;
     /**
-     * Get modification changes for a session
+     * Get modification changes for a session - FIXED
      */
     getModificationChanges(sessionId: string): Promise<ModificationChange[]>;
     /**
-     * Add a single modification change
+     * Add a single modification change - FIXED TYPE COMPATIBILITY
      */
     addModificationChange(sessionId: string, change: SafeModificationChange): Promise<void>;
     /**
@@ -94,7 +90,7 @@ export declare class RedisService {
      */
     isConnected(): Promise<boolean>;
     /**
-     * Get memory usage stats
+     * Get memory usage stats - FIXED
      */
     getStats(): Promise<{
         memoryUsage: string | null;

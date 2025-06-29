@@ -1,6 +1,6 @@
 "use strict";
 // ============================================================================
-// AST ANALYZER: processors/ASTAnalyzer.ts
+// UPDATED AST ANALYZER: processors/ASTAnalyzer.ts - Excludes UI Components
 // ============================================================================
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
@@ -27,10 +27,60 @@ class ASTAnalyzer {
             this.streamCallback(message);
         }
     }
+    /**
+     * Check if a file should be excluded from AST analysis
+     */
+    shouldExcludeFile(filePath) {
+        const excludePatterns = [
+            // UI component directories
+            /src[\/\\]components?[\/\\]ui[\/\\]/i,
+            /components?[\/\\]ui[\/\\]/i,
+            // Shadcn/ui specific patterns
+            /ui[\/\\](button|input|card|dialog|dropdown|select|textarea|checkbox|radio|switch|slider|progress|alert|badge|avatar|separator|skeleton|toast|tooltip|popover|command|calendar|accordion|tabs|sheet|scroll-area|menubar|navigation-menu|context-menu|hover-card|label|aspect-ratio|collapsible|toggle|form)\.tsx?$/i,
+            // Other UI library patterns
+            /ui[\/\\](components?|elements?|primitives?)[\/\\]/i,
+            // Generic exclude patterns
+            /\.d\.ts$/,
+            /test\.|spec\./,
+            /\.test\.|\.spec\./,
+            /node_modules[\/\\]/,
+            /\.git[\/\\]/,
+            /dist[\/\\]/,
+            /build[\/\\]/,
+            // Utility and config files
+            /utils?\.tsx?$/i,
+            /helpers?\.tsx?$/i,
+            /constants?\.tsx?$/i,
+            /config\.tsx?$/i,
+            /types\.tsx?$/i,
+            // Library and vendor files
+            /lib[\/\\]/,
+            /vendor[\/\\]/,
+            /third-party[\/\\]/
+        ];
+        const isExcluded = excludePatterns.some(pattern => pattern.test(filePath));
+        if (isExcluded) {
+            this.streamUpdate(`⏭️ Skipping UI/utility file: ${filePath}`);
+        }
+        return isExcluded;
+    }
+    /**
+     * Enhanced file parsing that respects exclusions
+     */
     parseFileWithAST(filePath, projectFiles) {
+        // Check if file should be excluded
+        if (this.shouldExcludeFile(filePath)) {
+            return [];
+        }
         this.streamUpdate(`🔬 Parsing ${filePath} with AST analysis...`);
         const file = projectFiles.get(filePath);
         if (!file) {
+            this.streamUpdate(`⚠️ File not found in project files: ${filePath}`);
+            return [];
+        }
+        // Additional content-based exclusion for UI libraries
+        if (this.isUILibraryFile(file.content)) {
+            this.streamUpdate(`⏭️ Skipping detected UI library file: ${filePath}`);
             return [];
         }
         try {
@@ -41,6 +91,7 @@ class ASTAnalyzer {
             const nodes = [];
             let nodeId = 1;
             const lines = file.content.split('\n');
+            const self = this;
             (0, traverse_1.default)(ast, {
                 JSXElement(path) {
                     var _a, _b, _c, _d, _e, _f, _g;
@@ -48,6 +99,9 @@ class ASTAnalyzer {
                     let tagName = 'unknown';
                     if (((_b = (_a = node.openingElement) === null || _a === void 0 ? void 0 : _a.name) === null || _b === void 0 ? void 0 : _b.type) === 'JSXIdentifier') {
                         tagName = node.openingElement.name.name;
+                    }
+                    if (self.isUILibraryComponent(tagName || '')) {
+                        return;
                     }
                     let textContent = '';
                     if (node.children) {
@@ -90,21 +144,111 @@ class ASTAnalyzer {
                     });
                 }
             });
-            this.streamUpdate(`✅ AST parsing complete! Found ${nodes.length} JSX elements.`);
-            return nodes;
+            const filteredNodes = nodes.filter(node => !self.isUILibraryComponent(node.tagName || ''));
+            this.streamUpdate(`✅ AST parsing complete! Found ${filteredNodes.length} relevant JSX elements (filtered ${nodes.length - filteredNodes.length} UI components).`);
+            return filteredNodes;
         }
         catch (error) {
             this.streamUpdate(`❌ AST parsing failed for ${filePath}: ${error}`);
             return [];
         }
     }
+    /**
+     * Detect if file content suggests it's a UI library file
+     */
+    isUILibraryFile(content) {
+        const uiLibraryIndicators = [
+            // Shadcn/ui indicators
+            /@\/lib\/utils/,
+            /class-variance-authority/,
+            /clsx.*cn/,
+            /React\.forwardRef.*displayName/,
+            // Radix UI indicators
+            /@radix-ui\//,
+            /Primitive\./,
+            // Other UI library indicators
+            /styled-components/,
+            /@emotion\//,
+            /chakra-ui/,
+            /mantine/,
+            // Generic UI component patterns
+            /interface.*Props.*extends.*React\./,
+            /VariantProps/,
+            /cva\(/,
+            // File content suggests it's a basic UI primitive
+            /export.*const.*=.*React\.forwardRef/,
+            /export.*\{.*as.*\}/
+        ];
+        const hasUIIndicators = uiLibraryIndicators.some(pattern => pattern.test(content));
+        // Additional check: if file only exports basic HTML elements wrapped in React.forwardRef
+        const isBasicWrapper = content.includes('React.forwardRef') &&
+            /return\s*<(div|span|button|input|textarea|select|label|p|h[1-6])\s/.test(content) &&
+            content.split('\n').length < 50; // Small files are likely basic wrappers
+        return hasUIIndicators || isBasicWrapper;
+    }
+    /**
+     * Check if a JSX tag name represents a UI library component
+     */
+    isUILibraryComponent(tagName) {
+        // Common UI library component patterns
+        const uiComponentPatterns = [
+            // Shadcn/ui components
+            /^(Button|Input|Card|CardHeader|CardContent|CardTitle|CardDescription|CardFooter)$/,
+            /^(Dialog|DialogContent|DialogHeader|DialogTitle|DialogDescription|DialogFooter|DialogTrigger)$/,
+            /^(DropdownMenu|DropdownMenuContent|DropdownMenuItem|DropdownMenuTrigger|DropdownMenuSeparator)$/,
+            /^(Select|SelectContent|SelectItem|SelectTrigger|SelectValue)$/,
+            /^(Textarea|Checkbox|RadioGroup|RadioGroupItem|Switch|Slider|Progress)$/,
+            /^(Alert|AlertDescription|AlertTitle|Badge|Avatar|AvatarImage|AvatarFallback)$/,
+            /^(Separator|Skeleton|Toast|Tooltip|TooltipContent|TooltipProvider|TooltipTrigger)$/,
+            /^(Popover|PopoverContent|PopoverTrigger|Command|CommandInput|CommandList|CommandItem)$/,
+            /^(Calendar|Accordion|AccordionContent|AccordionItem|AccordionTrigger)$/,
+            /^(Tabs|TabsContent|TabsList|TabsTrigger|Sheet|SheetContent|SheetHeader|SheetTitle)$/,
+            /^(ScrollArea|Menubar|NavigationMenu|ContextMenu|HoverCard|Label|AspectRatio)$/,
+            /^(Collapsible|Toggle|Form|FormControl|FormDescription|FormField|FormItem|FormLabel|FormMessage)$/,
+            // Generic UI patterns
+            /^UI[A-Z]/, // UI prefixed components
+            /^[A-Z][a-z]+UI$/, // Components ending with UI
+            /^Primitive[A-Z]/, // Primitive components
+            // Icon libraries
+            /^(Icon|Lucide|Feather|Heroicon|Material|FontAwesome)[A-Z]/,
+            /Icon$/, // Components ending with Icon
+            // Layout primitives that are likely from UI libraries
+            /^(Box|Stack|Flex|Grid|Container|Spacer|Divider|Center|Square|Circle)$/,
+            // Form primitives
+            /^(Field|Control|Group|Label|Help|Error|Success|Warning|Info)$/
+        ];
+        const isUIComponent = uiComponentPatterns.some(pattern => pattern.test(tagName));
+        if (isUIComponent) {
+            this.streamUpdate(`🎨 Skipping UI library component: ${tagName}`);
+        }
+        return isUIComponent;
+    }
+    /**
+     * Enhanced file relevance analysis with UI exclusion
+     */
     analyzeFileRelevance(prompt, filePath, astNodes, modificationMethod, projectFiles, anthropic, tokenTracker) {
         return __awaiter(this, void 0, void 0, function* () {
+            // Early exclusion check
+            if (this.shouldExcludeFile(filePath)) {
+                return {
+                    isRelevant: false,
+                    reasoning: 'File excluded: UI library or utility file',
+                    relevanceScore: 0
+                };
+            }
             const file = projectFiles.get(filePath);
             if (!file || astNodes.length === 0) {
                 return {
                     isRelevant: false,
-                    reasoning: 'File not found or no AST nodes available',
+                    reasoning: 'File not found or no relevant AST nodes available (UI components filtered out)',
+                    relevanceScore: 0
+                };
+            }
+            // Additional content-based exclusion
+            if (this.isUILibraryFile(file.content)) {
+                return {
+                    isRelevant: false,
+                    reasoning: 'File detected as UI library component',
                     relevanceScore: 0
                 };
             }
@@ -116,10 +260,11 @@ USER REQUEST: "${prompt}"
 FILE: ${filePath}
 METHOD: TARGETED_NODES
 
-ELEMENTS IN FILE:
+RELEVANT ELEMENTS IN FILE (UI components filtered out):
 ${nodesPreview}
 
 Question: Does this file contain specific elements that match the user's request?
+Note: UI library components (Button, Card, Input, etc.) have been filtered out to focus on business logic components.
 
 Answer with ONLY this format:
 RELEVANT: YES/NO
@@ -146,11 +291,12 @@ FILE PREVIEW:
 ${filePreview}...
 
 COMPONENT: ${file.componentName || 'Unknown'}
-ELEMENTS: ${elementSummary}
+RELEVANT ELEMENTS: ${elementSummary} (UI library components filtered)
 HAS BUTTONS: ${file.hasButtons}
 HAS SIGNIN: ${file.hasSignin}
 
 Question: Should this entire file be modified to fulfill the user's request?
+Note: This file has been confirmed as non-UI-library code suitable for modification.
 
 Answer with ONLY this format:
 RELEVANT: YES/NO
@@ -232,20 +378,28 @@ REASON: Main component file that needs layout changes
             };
         }
     }
+    /**
+     * Enhanced forced analysis that respects exclusions
+     */
     forceAnalyzeSpecificFiles(prompt, filePaths, method, projectFiles, anthropic, tokenTracker) {
         return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate(`🔍 Analyzing specific files: ${filePaths.join(', ')}`);
+            // Filter out excluded files first
+            const validFilePaths = filePaths.filter(path => !this.shouldExcludeFile(path));
+            if (validFilePaths.length < filePaths.length) {
+                this.streamUpdate(`🔍 Filtered ${filePaths.length - validFilePaths.length} UI/utility files from analysis`);
+            }
+            this.streamUpdate(`🔍 Analyzing ${validFilePaths.length} relevant files: ${validFilePaths.join(', ')}`);
             const results = [];
-            const maxFiles = Math.min(filePaths.length, 5);
+            const maxFiles = Math.min(validFilePaths.length, 5);
             for (let i = 0; i < maxFiles; i++) {
-                const filePath = filePaths[i];
+                const filePath = validFilePaths[i];
                 const astNodes = this.parseFileWithAST(filePath, projectFiles);
                 if (astNodes.length === 0) {
                     results.push({
                         filePath,
                         isRelevant: false,
                         score: 0,
-                        reasoning: 'No AST nodes found',
+                        reasoning: 'No relevant AST nodes found (UI components filtered)',
                     });
                     continue;
                 }
@@ -260,6 +414,24 @@ REASON: Main component file that needs layout changes
             }
             return results;
         });
+    }
+    /**
+     * Get statistics about filtered components
+     */
+    getFilteringStats(projectFiles) {
+        const totalFiles = projectFiles.size;
+        const excludedPaths = [];
+        for (const [filePath] of projectFiles) {
+            if (this.shouldExcludeFile(filePath)) {
+                excludedPaths.push(filePath);
+            }
+        }
+        return {
+            totalFiles,
+            excludedFiles: excludedPaths.length,
+            analyzableFiles: totalFiles - excludedPaths.length,
+            excludedPaths
+        };
     }
 }
 exports.ASTAnalyzer = ASTAnalyzer;

@@ -46,7 +46,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeModificationRoutes = initializeModificationRoutes;
-// routes/modification.ts - File modification routes
+// routes/modification.ts - FIXED File modification routes
 const express_1 = __importDefault(require("express"));
 const filemodifier_1 = require("../services/filemodifier");
 const uuid_1 = require("uuid");
@@ -358,7 +358,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sessionId: sessionId
                 });
             }
-            // Initialize stateless file modifier
+            // Initialize stateless file modifier - FIXED CONSTRUCTOR
             const fileModifier = new filemodifier_1.StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
             fileModifier.setStreamCallback((message) => {
                 sendEvent('progress', {
@@ -394,10 +394,40 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 sendEvent('progress', {
                     step: 9,
                     total: 15,
-                    message: `Stateless modification completed successfully in ${modificationDuration}ms! Applied ${result.approach} approach. Starting build & deploy pipeline...`,
+                    message: `Stateless modification completed successfully in ${modificationDuration}ms! Applied ${result.approach} approach. Writing changes to files...`,
                     buildId: buildId,
                     sessionId: sessionId
                 });
+                // CRITICAL: Ensure changes are written to actual files before build
+                try {
+                    sendEvent('progress', {
+                        step: 9.5,
+                        total: 15,
+                        message: 'Ensuring all Redis changes are written to temp files...',
+                        buildId: buildId,
+                        sessionId: sessionId
+                    });
+                    // The fileModifier.writeChangesToFiles() is already called inside processModification
+                    sendEvent('progress', {
+                        step: 9.7,
+                        total: 15,
+                        message: 'All changes written to temp files successfully',
+                        buildId: buildId,
+                        sessionId: sessionId
+                    });
+                }
+                catch (writeError) {
+                    console.error('Failed to write changes to files:', writeError);
+                    sendEvent('error', {
+                        success: false,
+                        error: 'Failed to write modifications to files',
+                        //@ts-ignore
+                        details: writeError.message,
+                        buildId: buildId,
+                        sessionId: sessionId
+                    });
+                    return;
+                }
                 // Save modification
                 try {
                     yield conversationHelper.saveModification(sessionId, {
@@ -417,10 +447,41 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('progress', {
                         step: 10,
                         total: 15,
-                        message: 'Creating deployment package with all stateless modifications...',
+                        message: 'Starting build & deploy pipeline with written changes...',
                         buildId: buildId,
                         sessionId: sessionId
                     });
+                    // DEBUG: Check what files exist in tempBuildDir before zipping
+                    console.log(`[${buildId}] DEBUG: Checking temp directory contents AFTER modification...`);
+                    const files = yield fs.promises.readdir(tempBuildDir, { recursive: true });
+                    console.log(`[${buildId}] Files in temp directory:`, files.slice(0, 20));
+                    // Check if React files were actually modified
+                    const srcDir = path_1.default.join(tempBuildDir, 'src');
+                    if (yield fs.promises.access(srcDir).then(() => true).catch(() => false)) {
+                        const srcFiles = yield fs.promises.readdir(srcDir, { recursive: true });
+                        console.log(`[${buildId}] React files in src/:`, srcFiles);
+                        // Check timestamps of modified files
+                        for (const file of srcFiles.slice(0, 5)) {
+                            const filePath = path_1.default.join(srcDir, file);
+                            try {
+                                const stats = yield fs.promises.stat(filePath);
+                                console.log(`[${buildId}] ${file} modified: ${stats.mtime}`);
+                            }
+                            catch (e) {
+                                //@ts-ignore
+                                console.log(`[${buildId}] Could not check ${file}:`, e.message);
+                            }
+                        }
+                    }
+                    // Check for package.json
+                    const packageJsonPath = path_1.default.join(tempBuildDir, 'package.json');
+                    try {
+                        const packageJson = JSON.parse(yield fs.promises.readFile(packageJsonPath, 'utf8'));
+                        console.log(`[${buildId}] Package.json found with dependencies:`, Object.keys(packageJson.dependencies || {}));
+                    }
+                    catch (_f) {
+                        console.log(`[${buildId}] ❌ No package.json found at: ${packageJsonPath}`);
+                    }
                     const zip = new adm_zip_1.default();
                     zip.addLocalFolder(tempBuildDir);
                     const zipBuffer = zip.toBuffer();
@@ -642,7 +703,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 catch (contextError) {
                     console.error('Context loading error:', contextError);
                 }
-                // Initialize stateless file modifier with Redis session backing
+                // Initialize stateless file modifier - FIXED CONSTRUCTOR
                 const fileModifier = new filemodifier_1.StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
                 // Start timing
                 const startTime = Date.now();
@@ -677,6 +738,19 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     // BUILD & DEPLOY PIPELINE
                     try {
                         console.log(`[${buildId}] Starting build pipeline after successful stateless modification...`);
+                        // DEBUG: Check what files exist in tempBuildDir before zipping
+                        console.log(`[${buildId}] DEBUG: Checking temp directory contents...`);
+                        const files = yield fs.promises.readdir(tempBuildDir, { recursive: true });
+                        console.log(`[${buildId}] Files in temp directory:`, files.slice(0, 20));
+                        // Check for package.json
+                        const packageJsonPath = path_1.default.join(tempBuildDir, 'package.json');
+                        try {
+                            const packageJson = JSON.parse(yield fs.promises.readFile(packageJsonPath, 'utf8'));
+                            console.log(`[${buildId}] Package.json found with dependencies:`, Object.keys(packageJson.dependencies || {}));
+                        }
+                        catch (_f) {
+                            console.log(`[${buildId}] ❌ No package.json found at: ${packageJsonPath}`);
+                        }
                         // Create zip and upload to Azure
                         const zip = new adm_zip_1.default();
                         zip.addLocalFolder(tempBuildDir);

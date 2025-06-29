@@ -1,8 +1,9 @@
 // ============================================================================
-// ENHANCED FULL FILE PROCESSOR: processors/FullFileProcessor.ts
+// FIXED FULL FILE PROCESSOR: processors/FullFileProcessor.ts - Path Resolution
 // ============================================================================
 
 import { promises as fs } from 'fs';
+import { join, resolve, isAbsolute } from 'path';
 import { ProjectFile, ASTNode, FileStructure } from '../filemodifier/types';
 import { RedisModificationSummary } from '../filemodifier/modification';
 import { ASTAnalyzer } from './Astanalyzer';
@@ -22,12 +23,14 @@ export class FullFileProcessor {
   private astAnalyzer: ASTAnalyzer;
   private structureValidator: StructureValidator;
   private streamCallback?: (message: string) => void;
+  private reactBasePath: string;
 
-  constructor(anthropic: any, tokenTracker: TokenTracker, astAnalyzer: ASTAnalyzer) {
+  constructor(anthropic: any, tokenTracker: TokenTracker, astAnalyzer: ASTAnalyzer, reactBasePath?: string) {
     this.anthropic = anthropic;
     this.tokenTracker = tokenTracker;
     this.astAnalyzer = astAnalyzer;
     this.structureValidator = new StructureValidator();
+    this.reactBasePath = reactBasePath || process.cwd();
   }
 
   setStreamCallback(callback: (message: string) => void): void {
@@ -37,6 +40,63 @@ export class FullFileProcessor {
   private streamUpdate(message: string): void {
     if (this.streamCallback) {
       this.streamCallback(message);
+    }
+  }
+
+  /**
+   * FIXED: Resolve the correct file path for saving
+   */
+  private resolveFilePath(projectFile: ProjectFile): string {
+    // If the file already has an absolute path, use it
+    if (isAbsolute(projectFile.path)) {
+      return projectFile.path;
+    }
+
+    // Try to construct the path from relativePath
+    if (projectFile.relativePath) {
+      // Remove 'src/' prefix if present in relativePath since we add it in join
+      const cleanRelativePath = projectFile.relativePath.replace(/^src[\/\\]/, '');
+      const constructedPath = join(this.reactBasePath, 'src', cleanRelativePath);
+      return constructedPath;
+    }
+
+    // Fallback: use the path as provided
+    return projectFile.path;
+  }
+
+  /**
+   * FIXED: Verify file exists before attempting modifications
+   */
+  private async verifyFileExists(filePath: string, actualPath: string): Promise<string | null> {
+    try {
+      await fs.access(actualPath);
+      return actualPath;
+    } catch (error) {
+      this.streamUpdate(`❌ File not found at expected path: ${actualPath}`);
+      this.streamUpdate(`🔍 Original file path: ${filePath}`);
+      
+      // Try alternative paths
+      const alternatives = [
+        join(this.reactBasePath, filePath),
+        join(this.reactBasePath, 'src', filePath),
+        join(this.reactBasePath, filePath.replace(/^src[\/\\]/, '')),
+      ];
+
+      for (const altPath of alternatives) {
+        try {
+          await fs.access(altPath);
+          this.streamUpdate(`✅ Found file at alternative path: ${altPath}`);
+          return altPath;
+        } catch {
+          // Continue trying
+        }
+      }
+
+      this.streamUpdate(`❌ File not found at any expected location. Checked paths:`);
+      this.streamUpdate(`   - ${actualPath}`);
+      alternatives.forEach(alt => this.streamUpdate(`   - ${alt}`));
+      
+      return null;
     }
   }
 
@@ -71,9 +131,21 @@ export class FullFileProcessor {
     
     // Step 2: Check ALL files for relevance
     for (const filePath of filesToCheck) {
+      const file = projectFiles.get(filePath);
+      if (!file) continue;
+
+      // FIXED: Resolve and verify file path
+      const actualPath = this.resolveFilePath(file);
+      const verifiedPath = await this.verifyFileExists(filePath, actualPath);
+      
+      if (!verifiedPath) {
+        this.streamUpdate(`⚠️ Skipping ${filePath} - file not found on filesystem`);
+        continue;
+      }
+
       const astNodes = this.astAnalyzer.parseFileWithAST(filePath, projectFiles);
       
-      if (astNodes.length === 0 && !projectFiles.get(filePath)?.isMainFile) {
+      if (astNodes.length === 0 && !file.isMainFile) {
         continue;
       }
       
@@ -93,16 +165,16 @@ export class FullFileProcessor {
         let success = false;
         
         if (isNavigationRequest && (filePath.toLowerCase().includes('nav') || filePath.toLowerCase().includes('header'))) {
-          success = await this.modifyFullFileForNavigation(filePath, prompt, relevanceResult.reasoning, projectFiles);
+          success = await this.modifyFullFileForNavigation(filePath, prompt, relevanceResult.reasoning, projectFiles, verifiedPath);
         } else if (isLayoutChange) {
-          success = await this.modifyFullFileWithLayoutTemplate(filePath, prompt, relevanceResult.reasoning, projectFiles);
+          success = await this.modifyFullFileWithLayoutTemplate(filePath, prompt, relevanceResult.reasoning, projectFiles, verifiedPath);
         } else {
-          success = await this.modifyFullFileWithTemplate(filePath, prompt, relevanceResult.reasoning, projectFiles);
+          success = await this.modifyFullFileWithTemplate(filePath, prompt, relevanceResult.reasoning, projectFiles, verifiedPath);
         }
         
         if (success) {
           successCount++;
-          modificationSummary.addChange('modified', filePath, `Enhanced full file modification: ${prompt.substring(0, 50)}...`);
+          await modificationSummary.addChange('modified', filePath, `Enhanced full file modification: ${prompt.substring(0, 50)}...`);
           this.streamUpdate(`✅ Modified ${filePath} using template prompts (Total: ${successCount})`);
         }
       } else {
@@ -143,11 +215,15 @@ export class FullFileProcessor {
     return false;
   }
 
+  /**
+   * FIXED: Modify full file with template and correct path handling
+   */
   private async modifyFullFileWithTemplate(
     filePath: string, 
     prompt: string, 
     relevanceReasoning: string, 
-    projectFiles: Map<string, ProjectFile>
+    projectFiles: Map<string, ProjectFile>,
+    verifiedPath: string
   ): Promise<boolean> {
     const file = projectFiles.get(filePath);
     if (!file) {
@@ -198,7 +274,13 @@ export class FullFileProcessor {
           const strictValidation = this.structureValidator.validateStructurePreservation(modifiedContent, structure);
           
           if (strictValidation.isValid) {
-            await fs.writeFile(file.path, modifiedContent, 'utf8');
+            // FIXED: Use verified path for writing
+            await fs.writeFile(verifiedPath, modifiedContent, 'utf8');
+            
+            // Update project file content in memory
+            file.content = modifiedContent;
+            file.lines = modifiedContent.split('\n').length;
+            
             this.streamUpdate(`✅ ${filePath} modified successfully with template validation`);
             return true;
           } else {
@@ -207,7 +289,12 @@ export class FullFileProcessor {
             const repairedContent = this.structureValidator.repairFileStructure(modifiedContent, structure, file.content);
             
             if (repairedContent) {
-              await fs.writeFile(file.path, repairedContent, 'utf8');
+              await fs.writeFile(verifiedPath, repairedContent, 'utf8');
+              
+              // Update project file content in memory
+              file.content = repairedContent;
+              file.lines = repairedContent.split('\n').length;
+              
               this.streamUpdate(`✅ ${filePath} modified successfully after template repair`);
               return true;
             } else {
@@ -228,11 +315,15 @@ export class FullFileProcessor {
     }
   }
 
+  /**
+   * FIXED: Layout template modification with path handling
+   */
   private async modifyFullFileWithLayoutTemplate(
     filePath: string, 
     prompt: string, 
     relevanceReasoning: string, 
-    projectFiles: Map<string, ProjectFile>
+    projectFiles: Map<string, ProjectFile>,
+    verifiedPath: string
   ): Promise<boolean> {
     const file = projectFiles.get(filePath);
     if (!file) {
@@ -284,7 +375,12 @@ export class FullFileProcessor {
           const relaxedValidation = this.structureValidator.validateStructurePreservationRelaxed(modifiedContent, structure);
           
           if (relaxedValidation.isValid) {
-            await fs.writeFile(file.path, modifiedContent, 'utf8');
+            await fs.writeFile(verifiedPath, modifiedContent, 'utf8');
+            
+            // Update project file content in memory
+            file.content = modifiedContent;
+            file.lines = modifiedContent.split('\n').length;
+            
             this.streamUpdate(`✅ ${filePath} layout modified successfully with template`);
             return true;
           } else {
@@ -295,7 +391,12 @@ export class FullFileProcessor {
             const repairedContent = layoutRepairFunction(modifiedContent, file.content, fileAnalysis.componentName);
             
             if (repairedContent) {
-              await fs.writeFile(file.path, repairedContent, 'utf8');
+              await fs.writeFile(verifiedPath, repairedContent, 'utf8');
+              
+              // Update project file content in memory
+              file.content = repairedContent;
+              file.lines = repairedContent.split('\n').length;
+              
               this.streamUpdate(`✅ ${filePath} layout modified successfully after enhanced repair`);
               return true;
             } else {
@@ -313,11 +414,15 @@ export class FullFileProcessor {
     }
   }
 
+  /**
+   * FIXED: Navigation modification with path handling
+   */
   private async modifyFullFileForNavigation(
     filePath: string, 
     prompt: string, 
     relevanceReasoning: string, 
-    projectFiles: Map<string, ProjectFile>
+    projectFiles: Map<string, ProjectFile>,
+    verifiedPath: string
   ): Promise<boolean> {
     const file = projectFiles.get(filePath);
     if (!file) {
@@ -399,14 +504,24 @@ RESPONSE: Return ONLY the complete modified navigation file:
           const relaxedValidation = this.structureValidator.validateStructurePreservationRelaxed(modifiedContent, structure);
           
           if (relaxedValidation.isValid) {
-            await fs.writeFile(file.path, modifiedContent, 'utf8');
+            await fs.writeFile(verifiedPath, modifiedContent, 'utf8');
+            
+            // Update project file content in memory
+            file.content = modifiedContent;
+            file.lines = modifiedContent.split('\n').length;
+            
             this.streamUpdate(`✅ ${filePath} navigation highlighting added successfully`);
             return true;
           } else {
             const repairedContent = this.structureValidator.repairFileStructure(modifiedContent, structure, file.content);
             
             if (repairedContent) {
-              await fs.writeFile(file.path, repairedContent, 'utf8');
+              await fs.writeFile(verifiedPath, repairedContent, 'utf8');
+              
+              // Update project file content in memory
+              file.content = repairedContent;
+              file.lines = repairedContent.split('\n').length;
+              
               this.streamUpdate(`✅ ${filePath} navigation highlighting added after repair`);
               return true;
             } else {

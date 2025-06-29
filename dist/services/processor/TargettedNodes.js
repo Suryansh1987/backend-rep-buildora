@@ -1,6 +1,6 @@
 "use strict";
 // ============================================================================
-// ENHANCED TARGETED NODES PROCESSOR: processors/TargetedNodesProcessor.ts
+// FIXED TARGETED NODES PROCESSOR: processors/TargetedNodesProcessor.ts
 // ============================================================================
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
@@ -14,14 +14,16 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TargetedNodesProcessor = void 0;
 const fs_1 = require("fs");
+const path_1 = require("path");
 const Structurevalidator_1 = require("../../utils/Structurevalidator");
 const template_1 = require("../filemodifier/template");
 class TargetedNodesProcessor {
-    constructor(anthropic, tokenTracker, astAnalyzer) {
+    constructor(anthropic, tokenTracker, astAnalyzer, reactBasePath) {
         this.anthropic = anthropic;
         this.tokenTracker = tokenTracker;
         this.astAnalyzer = astAnalyzer;
         this.structureValidator = new Structurevalidator_1.StructureValidator();
+        this.reactBasePath = reactBasePath || process.cwd();
     }
     setStreamCallback(callback) {
         this.streamCallback = callback;
@@ -30,6 +32,59 @@ class TargetedNodesProcessor {
         if (this.streamCallback) {
             this.streamCallback(message);
         }
+    }
+    /**
+     * FIXED: Resolve the correct file path for saving
+     */
+    resolveFilePath(projectFile) {
+        // If the file already has an absolute path, use it
+        if ((0, path_1.isAbsolute)(projectFile.path)) {
+            return projectFile.path;
+        }
+        // Try to construct the path from relativePath
+        if (projectFile.relativePath) {
+            // Remove 'src/' prefix if present in relativePath since we add it in join
+            const cleanRelativePath = projectFile.relativePath.replace(/^src[\/\\]/, '');
+            const constructedPath = (0, path_1.join)(this.reactBasePath, 'src', cleanRelativePath);
+            return constructedPath;
+        }
+        // Fallback: use the path as provided
+        return projectFile.path;
+    }
+    /**
+     * FIXED: Verify file exists before attempting modifications
+     */
+    verifyFileExists(filePath, actualPath) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                yield fs_1.promises.access(actualPath);
+                return true;
+            }
+            catch (error) {
+                this.streamUpdate(`❌ File not found at expected path: ${actualPath}`);
+                this.streamUpdate(`🔍 Original file path: ${filePath}`);
+                // Try alternative paths
+                const alternatives = [
+                    (0, path_1.join)(this.reactBasePath, filePath),
+                    (0, path_1.join)(this.reactBasePath, 'src', filePath),
+                    (0, path_1.join)(this.reactBasePath, filePath.replace(/^src[\/\\]/, '')),
+                ];
+                for (const altPath of alternatives) {
+                    try {
+                        yield fs_1.promises.access(altPath);
+                        this.streamUpdate(`✅ Found file at alternative path: ${altPath}`);
+                        return true;
+                    }
+                    catch (_a) {
+                        // Continue trying
+                    }
+                }
+                this.streamUpdate(`❌ File not found at any expected location. Checked paths:`);
+                this.streamUpdate(`   - ${actualPath}`);
+                alternatives.forEach(alt => this.streamUpdate(`   - ${alt}`));
+                return false;
+            }
+        });
     }
     handleTargetedModification(prompt, projectFiles, modificationSummary) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -47,25 +102,36 @@ class TargetedNodesProcessor {
                     relevanceResult.targetNodes &&
                     relevanceResult.targetNodes.length > 0 &&
                     relevanceResult.relevanceScore >= RELEVANCE_THRESHOLD) {
-                    relevantFiles.push({
-                        filePath,
-                        score: relevanceResult.relevanceScore,
-                        targetNodes: relevanceResult.targetNodes
-                    });
+                    const projectFile = projectFiles.get(filePath);
+                    if (projectFile) {
+                        const actualPath = this.resolveFilePath(projectFile);
+                        // FIXED: Verify file exists before adding to processing queue
+                        if (yield this.verifyFileExists(filePath, actualPath)) {
+                            relevantFiles.push({
+                                filePath,
+                                score: relevanceResult.relevanceScore,
+                                targetNodes: relevanceResult.targetNodes,
+                                actualPath
+                            });
+                        }
+                        else {
+                            this.streamUpdate(`⚠️ Skipping ${filePath} - file not found on filesystem`);
+                        }
+                    }
                 }
             }
             // Step 2: Process ALL files that meet the threshold (sorted by score)
             relevantFiles.sort((a, b) => b.score - a.score);
             this.streamUpdate(`🎯 Processing ${relevantFiles.length} files with target elements using enhanced templates (score >= ${RELEVANCE_THRESHOLD})`);
             // Step 3: Apply modifications to ALL relevant files using templates
-            for (const { filePath, targetNodes, score } of relevantFiles) {
+            for (const { filePath, targetNodes, score, actualPath } of relevantFiles) {
                 this.streamUpdate(`🎯 Processing ${filePath} (score: ${score}) with template prompts...`);
                 const modifications = yield this.modifyCodeSnippetsWithTemplate(prompt, targetNodes, filePath, projectFiles);
                 if (modifications.size > 0) {
-                    const success = yield this.applyModifications(filePath, targetNodes, modifications, projectFiles);
+                    const success = yield this.applyModifications(filePath, targetNodes, modifications, projectFiles, actualPath);
                     if (success) {
                         successCount++;
-                        modificationSummary.addChange('modified', filePath, `Enhanced AST targeted modifications: ${modifications.size} nodes updated with templates`);
+                        yield modificationSummary.addChange('modified', filePath, `Enhanced AST targeted modifications: ${modifications.size} nodes updated with templates`);
                         this.streamUpdate(`✅ Modified ${filePath} using templates (${modifications.size} nodes updated)`);
                     }
                 }
@@ -148,10 +214,22 @@ ${node.codeSnippet}
             }
         });
     }
-    applyModifications(filePath, targetNodes, modifications, projectFiles) {
+    /**
+     * FIXED: Apply modifications with correct path resolution
+     */
+    applyModifications(filePath, targetNodes, modifications, projectFiles, actualPath) {
         return __awaiter(this, void 0, void 0, function* () {
             const file = projectFiles.get(filePath);
             if (!file) {
+                this.streamUpdate(`❌ File not found in project files: ${filePath}`);
+                return false;
+            }
+            // FIXED: Double-check file exists at actual path
+            try {
+                yield fs_1.promises.access(actualPath);
+            }
+            catch (error) {
+                this.streamUpdate(`❌ Cannot access file for writing: ${actualPath}`);
                 return false;
             }
             const structure = this.structureValidator.extractFileStructure(file.content);
@@ -189,8 +267,12 @@ ${node.codeSnippet}
                 }
             }
             try {
-                yield fs_1.promises.writeFile(file.path, modifiedContent, 'utf8');
+                // FIXED: Use the resolved actual path for writing
+                yield fs_1.promises.writeFile(actualPath, modifiedContent, 'utf8');
                 this.streamUpdate(`💾 Successfully saved template modifications to ${filePath}`);
+                // Update the project file content in memory
+                file.content = modifiedContent;
+                file.lines = modifiedContent.split('\n').length;
                 return true;
             }
             catch (error) {
@@ -281,63 +363,6 @@ ${node.codeSnippet}
             summary += `Key files: ${keyFiles.join(', ')}.`;
         }
         return summary;
-    }
-    // Helper method for legacy compatibility
-    modifyCodeSnippets(prompt, targetNodes) {
-        return __awaiter(this, void 0, void 0, function* () {
-            // This is kept for backward compatibility but now just calls the template version
-            const snippetsInfo = targetNodes.map(node => `**${node.id}:** (lines ${node.startLine}-${node.endLine})
-\`\`\`jsx
-${node.codeSnippet}
-\`\`\`
-`).join('\n\n');
-            const claudePrompt = `
-**USER REQUEST:** "${prompt}"
-
-**Code Snippets to Modify:**
-${snippetsInfo}
-
-**TASK:** Modify each code snippet according to the request.
-
-**RESPONSE FORMAT:** Return ONLY this JSON:
-\`\`\`json
-{
-  "node_1": "<modified JSX code here>",
-  "node_5": "<modified JSX code here>"
-}
-\`\`\`
-    `;
-            try {
-                const response = yield this.anthropic.messages.create({
-                    model: 'claude-3-5-sonnet-20240620',
-                    max_tokens: 6000,
-                    temperature: 0,
-                    messages: [{ role: 'user', content: claudePrompt }],
-                });
-                this.tokenTracker.logUsage(response.usage, `Legacy Code Snippets Modification: ${targetNodes.length} nodes`);
-                const firstBlock = response.content[0];
-                if ((firstBlock === null || firstBlock === void 0 ? void 0 : firstBlock.type) === 'text') {
-                    const text = firstBlock.text;
-                    const jsonMatch = text.match(/```json\n([\s\S]*?)```/) || text.match(/\{[\s\S]*\}/);
-                    if (jsonMatch) {
-                        const jsonText = jsonMatch[1] || jsonMatch[0];
-                        const modifications = JSON.parse(jsonText);
-                        const modMap = new Map();
-                        for (const [nodeId, modifiedCode] of Object.entries(modifications)) {
-                            if (typeof modifiedCode === 'string' && modifiedCode.trim()) {
-                                modMap.set(nodeId, modifiedCode);
-                            }
-                        }
-                        return modMap;
-                    }
-                }
-                return new Map();
-            }
-            catch (error) {
-                this.streamUpdate(`❌ Error modifying code snippets (legacy): ${error}`);
-                return new Map();
-            }
-        });
     }
 }
 exports.TargetedNodesProcessor = TargetedNodesProcessor;

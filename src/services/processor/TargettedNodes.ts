@@ -1,8 +1,9 @@
 // ============================================================================
-// ENHANCED TARGETED NODES PROCESSOR: processors/TargetedNodesProcessor.ts
+// FIXED TARGETED NODES PROCESSOR: processors/TargetedNodesProcessor.ts
 // ============================================================================
 
 import { promises as fs } from 'fs';
+import { join, resolve, isAbsolute } from 'path';
 import { ProjectFile, ASTNode } from '../filemodifier/types';
 import { RedisModificationSummary } from '../filemodifier/modification';
 import { ASTAnalyzer } from './Astanalyzer';
@@ -20,12 +21,14 @@ export class TargetedNodesProcessor {
   private astAnalyzer: ASTAnalyzer;
   private structureValidator: StructureValidator;
   private streamCallback?: (message: string) => void;
+  private reactBasePath: string;
 
-  constructor(anthropic: any, tokenTracker: TokenTracker, astAnalyzer: ASTAnalyzer) {
+  constructor(anthropic: any, tokenTracker: TokenTracker, astAnalyzer: ASTAnalyzer, reactBasePath?: string) {
     this.anthropic = anthropic;
     this.tokenTracker = tokenTracker;
     this.astAnalyzer = astAnalyzer;
     this.structureValidator = new StructureValidator();
+    this.reactBasePath = reactBasePath || process.cwd();
   }
 
   setStreamCallback(callback: (message: string) => void): void {
@@ -38,6 +41,63 @@ export class TargetedNodesProcessor {
     }
   }
 
+  /**
+   * FIXED: Resolve the correct file path for saving
+   */
+  private resolveFilePath(projectFile: ProjectFile): string {
+    // If the file already has an absolute path, use it
+    if (isAbsolute(projectFile.path)) {
+      return projectFile.path;
+    }
+
+    // Try to construct the path from relativePath
+    if (projectFile.relativePath) {
+      // Remove 'src/' prefix if present in relativePath since we add it in join
+      const cleanRelativePath = projectFile.relativePath.replace(/^src[\/\\]/, '');
+      const constructedPath = join(this.reactBasePath, 'src', cleanRelativePath);
+      return constructedPath;
+    }
+
+    // Fallback: use the path as provided
+    return projectFile.path;
+  }
+
+  /**
+   * FIXED: Verify file exists before attempting modifications
+   */
+  private async verifyFileExists(filePath: string, actualPath: string): Promise<boolean> {
+    try {
+      await fs.access(actualPath);
+      return true;
+    } catch (error) {
+      this.streamUpdate(`❌ File not found at expected path: ${actualPath}`);
+      this.streamUpdate(`🔍 Original file path: ${filePath}`);
+      
+      // Try alternative paths
+      const alternatives = [
+        join(this.reactBasePath, filePath),
+        join(this.reactBasePath, 'src', filePath),
+        join(this.reactBasePath, filePath.replace(/^src[\/\\]/, '')),
+      ];
+
+      for (const altPath of alternatives) {
+        try {
+          await fs.access(altPath);
+          this.streamUpdate(`✅ Found file at alternative path: ${altPath}`);
+          return true;
+        } catch {
+          // Continue trying
+        }
+      }
+
+      this.streamUpdate(`❌ File not found at any expected location. Checked paths:`);
+      this.streamUpdate(`   - ${actualPath}`);
+      alternatives.forEach(alt => this.streamUpdate(`   - ${alt}`));
+      
+      return false;
+    }
+  }
+
   async handleTargetedModification(
     prompt: string, 
     projectFiles: Map<string, ProjectFile>, 
@@ -47,7 +107,7 @@ export class TargetedNodesProcessor {
     
     let successCount = 0;
     const RELEVANCE_THRESHOLD = 70;
-    const relevantFiles: Array<{ filePath: string; score: number; targetNodes: ASTNode[] }> = [];
+    const relevantFiles: Array<{ filePath: string; score: number; targetNodes: ASTNode[]; actualPath: string }> = [];
     
     // Step 1: Analyze ALL files for relevant nodes
     for (const [filePath] of projectFiles) {
@@ -69,11 +129,22 @@ export class TargetedNodesProcessor {
           relevanceResult.targetNodes.length > 0 &&
           relevanceResult.relevanceScore >= RELEVANCE_THRESHOLD) {
         
-        relevantFiles.push({
-          filePath,
-          score: relevanceResult.relevanceScore,
-          targetNodes: relevanceResult.targetNodes
-        });
+        const projectFile = projectFiles.get(filePath);
+        if (projectFile) {
+          const actualPath = this.resolveFilePath(projectFile);
+          
+          // FIXED: Verify file exists before adding to processing queue
+          if (await this.verifyFileExists(filePath, actualPath)) {
+            relevantFiles.push({
+              filePath,
+              score: relevanceResult.relevanceScore,
+              targetNodes: relevanceResult.targetNodes,
+              actualPath
+            });
+          } else {
+            this.streamUpdate(`⚠️ Skipping ${filePath} - file not found on filesystem`);
+          }
+        }
       }
     }
     
@@ -83,16 +154,16 @@ export class TargetedNodesProcessor {
     this.streamUpdate(`🎯 Processing ${relevantFiles.length} files with target elements using enhanced templates (score >= ${RELEVANCE_THRESHOLD})`);
     
     // Step 3: Apply modifications to ALL relevant files using templates
-    for (const { filePath, targetNodes, score } of relevantFiles) {
+    for (const { filePath, targetNodes, score, actualPath } of relevantFiles) {
       this.streamUpdate(`🎯 Processing ${filePath} (score: ${score}) with template prompts...`);
       
       const modifications = await this.modifyCodeSnippetsWithTemplate(prompt, targetNodes, filePath, projectFiles);
       
       if (modifications.size > 0) {
-        const success = await this.applyModifications(filePath, targetNodes, modifications, projectFiles);
+        const success = await this.applyModifications(filePath, targetNodes, modifications, projectFiles, actualPath);
         if (success) {
           successCount++;
-          modificationSummary.addChange('modified', filePath, `Enhanced AST targeted modifications: ${modifications.size} nodes updated with templates`);
+          await modificationSummary.addChange('modified', filePath, `Enhanced AST targeted modifications: ${modifications.size} nodes updated with templates`);
           this.streamUpdate(`✅ Modified ${filePath} using templates (${modifications.size} nodes updated)`);
         }
       }
@@ -201,14 +272,27 @@ ${node.codeSnippet}
     }
   }
 
+  /**
+   * FIXED: Apply modifications with correct path resolution
+   */
   private async applyModifications(
     filePath: string, 
     targetNodes: ASTNode[], 
     modifications: Map<string, string>, 
-    projectFiles: Map<string, ProjectFile>
+    projectFiles: Map<string, ProjectFile>,
+    actualPath: string
   ): Promise<boolean> {
     const file = projectFiles.get(filePath);
     if (!file) {
+      this.streamUpdate(`❌ File not found in project files: ${filePath}`);
+      return false;
+    }
+
+    // FIXED: Double-check file exists at actual path
+    try {
+      await fs.access(actualPath);
+    } catch (error) {
+      this.streamUpdate(`❌ Cannot access file for writing: ${actualPath}`);
       return false;
     }
 
@@ -256,8 +340,14 @@ ${node.codeSnippet}
     }
     
     try {
-      await fs.writeFile(file.path, modifiedContent, 'utf8');
+      // FIXED: Use the resolved actual path for writing
+      await fs.writeFile(actualPath, modifiedContent, 'utf8');
       this.streamUpdate(`💾 Successfully saved template modifications to ${filePath}`);
+      
+      // Update the project file content in memory
+      file.content = modifiedContent;
+      file.lines = modifiedContent.split('\n').length;
+      
       return true;
     } catch (error) {
       this.streamUpdate(`❌ Failed to save ${filePath}: ${error}`);
@@ -368,69 +458,5 @@ ${node.codeSnippet}
     }
     
     return summary;
-  }
-
-  // Helper method for legacy compatibility
-  private async modifyCodeSnippets(prompt: string, targetNodes: ASTNode[]): Promise<Map<string, string>> {
-    // This is kept for backward compatibility but now just calls the template version
-    const snippetsInfo = targetNodes.map(node => 
-      `**${node.id}:** (lines ${node.startLine}-${node.endLine})
-\`\`\`jsx
-${node.codeSnippet}
-\`\`\`
-`).join('\n\n');
-
-    const claudePrompt = `
-**USER REQUEST:** "${prompt}"
-
-**Code Snippets to Modify:**
-${snippetsInfo}
-
-**TASK:** Modify each code snippet according to the request.
-
-**RESPONSE FORMAT:** Return ONLY this JSON:
-\`\`\`json
-{
-  "node_1": "<modified JSX code here>",
-  "node_5": "<modified JSX code here>"
-}
-\`\`\`
-    `;
-
-    try {
-      const response = await this.anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20240620',
-        max_tokens: 6000,
-        temperature: 0,
-        messages: [{ role: 'user', content: claudePrompt }],
-      });
-
-      this.tokenTracker.logUsage(response.usage, `Legacy Code Snippets Modification: ${targetNodes.length} nodes`);
-
-      const firstBlock = response.content[0];
-      if (firstBlock?.type === 'text') {
-        const text = firstBlock.text;
-        const jsonMatch = text.match(/```json\n([\s\S]*?)```/) || text.match(/\{[\s\S]*\}/);
-        
-        if (jsonMatch) {
-          const jsonText = jsonMatch[1] || jsonMatch[0];
-          const modifications = JSON.parse(jsonText);
-          const modMap = new Map<string, string>();
-          
-          for (const [nodeId, modifiedCode] of Object.entries(modifications)) {
-            if (typeof modifiedCode === 'string' && modifiedCode.trim()) {
-              modMap.set(nodeId, modifiedCode as string);
-            }
-          }
-          
-          return modMap;
-        }
-      }
-      
-      return new Map();
-    } catch (error) {
-      this.streamUpdate(`❌ Error modifying code snippets (legacy): ${error}`);
-      return new Map();
-    }
   }
 }

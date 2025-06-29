@@ -13,9 +13,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.RedisService = void 0;
-// services/redis.ts
+// services/redis.ts - FIXED VERSION WITH PROPER TYPE COMPATIBILITY
 const ioredis_1 = __importDefault(require("ioredis"));
-const validTypes = ['modified', 'created', 'updated'];
 class RedisService {
     constructor(redisUrl) {
         this.DEFAULT_TTL = 3600; // 1 hour
@@ -34,7 +33,7 @@ class RedisService {
         });
     }
     // ==============================================================
-    // PROJECT FILES CACHE METHODS
+    // PROJECT FILES CACHE METHODS - FIXED
     // ==============================================================
     /**
      * Store project files map for a session
@@ -42,12 +41,19 @@ class RedisService {
     setProjectFiles(sessionId, projectFiles) {
         return __awaiter(this, void 0, void 0, function* () {
             const key = `project_files:${sessionId}`;
-            const data = JSON.stringify(Object.fromEntries(projectFiles));
+            // FIXED: Better serialization handling
+            const serializedData = {};
+            for (const [filePath, file] of projectFiles.entries()) {
+                serializedData[filePath] = Object.assign(Object.assign({}, file), { 
+                    // Ensure all required fields are present
+                    name: file.name || '', path: file.path || '', relativePath: file.relativePath || '', content: file.content || '', lines: file.lines || 0, size: file.size || 0, snippet: file.snippet || '', componentName: file.componentName || null, hasButtons: file.hasButtons || false, hasSignin: file.hasSignin || false, isMainFile: file.isMainFile || false });
+            }
+            const data = JSON.stringify(serializedData);
             yield this.redis.setex(key, this.PROJECT_FILES_TTL, data);
         });
     }
     /**
-     * Get project files map for a session
+     * Get project files map for a session - FIXED
      */
     getProjectFiles(sessionId) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -57,7 +63,26 @@ class RedisService {
                 return null;
             try {
                 const parsed = JSON.parse(data);
-                return new Map(Object.entries(parsed));
+                const projectFiles = new Map();
+                // FIXED: Proper reconstruction of ProjectFile objects
+                for (const [filePath, fileData] of Object.entries(parsed)) {
+                    const file = fileData;
+                    const projectFile = {
+                        name: file.name || '',
+                        path: file.path || '',
+                        relativePath: file.relativePath || '',
+                        content: file.content || '',
+                        lines: file.lines || 0,
+                        size: file.size || 0,
+                        snippet: file.snippet || '',
+                        componentName: file.componentName || null,
+                        hasButtons: Boolean(file.hasButtons),
+                        hasSignin: Boolean(file.hasSignin),
+                        isMainFile: Boolean(file.isMainFile)
+                    };
+                    projectFiles.set(filePath, projectFile);
+                }
+                return projectFiles;
             }
             catch (error) {
                 console.error('Error parsing project files from Redis:', error);
@@ -75,7 +100,7 @@ class RedisService {
         });
     }
     /**
-     * Add or update a single project file
+     * Add or update a single project file - FIXED
      */
     updateProjectFile(sessionId, filePath, projectFile) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -90,12 +115,25 @@ class RedisService {
                     console.error('Error parsing existing project files:', error);
                 }
             }
-            projectFiles[filePath] = projectFile;
+            // FIXED: Ensure proper serialization
+            projectFiles[filePath] = {
+                name: projectFile.name || '',
+                path: projectFile.path || '',
+                relativePath: projectFile.relativePath || '',
+                content: projectFile.content || '',
+                lines: projectFile.lines || 0,
+                size: projectFile.size || 0,
+                snippet: projectFile.snippet || '',
+                componentName: projectFile.componentName || null,
+                hasButtons: Boolean(projectFile.hasButtons),
+                hasSignin: Boolean(projectFile.hasSignin),
+                isMainFile: Boolean(projectFile.isMainFile)
+            };
             yield this.redis.setex(key, this.PROJECT_FILES_TTL, JSON.stringify(projectFiles));
         });
     }
     // ==============================================================
-    // MODIFICATION SUMMARY METHODS
+    // MODIFICATION SUMMARY METHODS - FIXED
     // ==============================================================
     /**
      * Store modification changes for a session
@@ -103,11 +141,25 @@ class RedisService {
     setModificationChanges(sessionId, changes) {
         return __awaiter(this, void 0, void 0, function* () {
             const key = `mod_changes:${sessionId}`;
-            yield this.redis.setex(key, this.SESSION_TTL, JSON.stringify(changes));
+            // FIXED: Ensure proper serialization of changes
+            const serializedChanges = changes.map(change => ({
+                type: change.type,
+                file: change.file,
+                description: change.description,
+                timestamp: change.timestamp,
+                approach: change.approach || undefined,
+                success: change.success !== undefined ? Boolean(change.success) : undefined,
+                details: change.details ? {
+                    linesChanged: change.details.linesChanged || undefined,
+                    componentsAffected: change.details.componentsAffected || undefined,
+                    reasoning: change.details.reasoning || undefined
+                } : undefined
+            }));
+            yield this.redis.setex(key, this.SESSION_TTL, JSON.stringify(serializedChanges));
         });
     }
     /**
-     * Get modification changes for a session
+     * Get modification changes for a session - FIXED
      */
     getModificationChanges(sessionId) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -116,7 +168,21 @@ class RedisService {
             if (!data)
                 return [];
             try {
-                return JSON.parse(data);
+                const parsed = JSON.parse(data);
+                // FIXED: Proper reconstruction of ModificationChange objects
+                return parsed.map((change) => ({
+                    type: change.type,
+                    file: change.file,
+                    description: change.description,
+                    timestamp: change.timestamp,
+                    approach: change.approach || undefined,
+                    success: change.success !== undefined ? Boolean(change.success) : undefined,
+                    details: change.details ? {
+                        linesChanged: change.details.linesChanged || undefined,
+                        componentsAffected: change.details.componentsAffected || undefined,
+                        reasoning: change.details.reasoning || undefined
+                    } : undefined
+                }));
             }
             catch (error) {
                 console.error('Error parsing modification changes from Redis:', error);
@@ -125,7 +191,7 @@ class RedisService {
         });
     }
     /**
-     * Add a single modification change
+     * Add a single modification change - FIXED TYPE COMPATIBILITY
      */
     addModificationChange(sessionId, change) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -306,7 +372,7 @@ class RedisService {
         });
     }
     /**
-     * Get memory usage stats
+     * Get memory usage stats - FIXED
      */
     getStats() {
         return __awaiter(this, void 0, void 0, function* () {
