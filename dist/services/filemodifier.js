@@ -1,4 +1,7 @@
 "use strict";
+// ============================================================================
+// SECURE FILE MODIFIER SERVICE - Enhanced with Strict src/ Path Restrictions
+// ============================================================================
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -47,12 +50,9 @@ const scopeanalyzer_1 = require("./filemodifier/scopeanalyzer");
 const component_1 = require("./filemodifier/component");
 const dependancy_1 = require("./filemodifier/dependancy");
 const fallback_1 = require("./filemodifier/fallback");
-// Import modular processors
+// Import secure processors with path restriction
+const pathrestrictor_1 = require("./pathrestrictor");
 const Astanalyzer_1 = require("./processor/Astanalyzer");
-const projectanalyzer_1 = require("./processor/projectanalyzer");
-const Fullfileprocessor_1 = require("./processor/Fullfileprocessor");
-const TargettedNodes_1 = require("./processor/TargettedNodes");
-const ComponentAddition_1 = require("./processor/ComponentAddition");
 const TokenTracer_1 = require("../utils/TokenTracer");
 const Redis_1 = require("./Redis");
 const modification_1 = require("./filemodifier/modification");
@@ -61,53 +61,42 @@ const path = __importStar(require("path"));
 class StatelessIntelligentFileModifier {
     constructor(anthropic, reactBasePath, sessionId, redisUrl) {
         this.anthropic = anthropic;
-        this.reactBasePath = reactBasePath;
+        this.reactBasePath = path.resolve(reactBasePath);
         this.sessionId = sessionId;
         this.redis = new Redis_1.RedisService(redisUrl || process.env.REDIS_URL || 'redis://localhost:6379');
-        // Initialize early to avoid undefined issues
-        this.streamCallback = undefined;
+        // Initialize security manager FIRST
+        this.pathManager = new pathrestrictor_1.PathRestrictionManager(this.reactBasePath);
         // Initialize components
-        this.initializeComponents();
+        this.initializeSecureComponents();
         this.setupStreamCallbacks();
-        // Log initialization
-        this.streamUpdate(`🏗️ Stateless file modifier initialization:`);
-        this.streamUpdate(`   React Base Path: ${reactBasePath}`);
+        // Log initialization with security info
+        this.streamUpdate(`🔒 SECURE file modifier initialization:`);
+        this.streamUpdate(`   React Base Path: ${this.reactBasePath}`);
+        this.streamUpdate(`   Secure src Path: ${path.join(this.reactBasePath, 'src')}`);
         this.streamUpdate(`   Session ID: ${sessionId}`);
+        this.streamUpdate(`   Security: Path restrictions ENABLED`);
     }
-    initializeComponents() {
+    initializeSecureComponents() {
         // Initialize original modules
         this.scopeAnalyzer = new scopeanalyzer_1.ScopeAnalyzer(this.anthropic);
         this.componentGenerationSystem = new component_1.ComponentGenerationSystem(this.anthropic, this.reactBasePath);
         this.dependencyManager = new dependancy_1.DependencyManager(new Map());
         this.fallbackMechanism = new fallback_1.FallbackMechanism(this.anthropic);
-        // Initialize processors
+        // Initialize secure processors
         this.tokenTracker = new TokenTracer_1.TokenTracker();
         this.astAnalyzer = new Astanalyzer_1.ASTAnalyzer();
-        this.projectAnalyzer = new projectanalyzer_1.ProjectAnalyzer(this.reactBasePath);
-        // Initialize processors with fallback for constructor compatibility
-        try {
-            this.fullFileProcessor = new Fullfileprocessor_1.FullFileProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer, this.reactBasePath);
-        }
-        catch (error) {
-            this.fullFileProcessor = new Fullfileprocessor_1.FullFileProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer);
-            if ('reactBasePath' in this.fullFileProcessor) {
-                this.fullFileProcessor.reactBasePath = this.reactBasePath;
-            }
-        }
-        try {
-            this.targetedNodesProcessor = new TargettedNodes_1.TargetedNodesProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer, this.reactBasePath);
-        }
-        catch (error) {
-            this.targetedNodesProcessor = new TargettedNodes_1.TargetedNodesProcessor(this.anthropic, this.tokenTracker, this.astAnalyzer);
-            if ('reactBasePath' in this.targetedNodesProcessor) {
-                this.targetedNodesProcessor.reactBasePath = this.reactBasePath;
-            }
-        }
-        this.componentAdditionProcessor = new ComponentAddition_1.ComponentAdditionProcessor(this.anthropic, this.reactBasePath, this.tokenTracker);
+        // Use SECURE versions of processors
+        this.safeProjectAnalyzer = new pathrestrictor_1.SafeProjectAnalyzer(this.reactBasePath);
+        this.safeFullFileProcessor = new pathrestrictor_1.SafeFullFileProcessor(this.anthropic, this.tokenTracker, this.reactBasePath);
+        this.safeComponentAdditionProcessor = new pathrestrictor_1.SafeComponentAdditionProcessor(this.anthropic, this.reactBasePath, this.tokenTracker);
     }
     setupStreamCallbacks() {
         const streamUpdate = (message) => this.streamUpdate(message);
         // Set callbacks with safety checks
+        this.pathManager.setStreamCallback(streamUpdate);
+        this.safeProjectAnalyzer.setStreamCallback(streamUpdate);
+        this.safeFullFileProcessor.setStreamCallback(streamUpdate);
+        this.safeComponentAdditionProcessor.setStreamCallback(streamUpdate);
         if (this.scopeAnalyzer && typeof this.scopeAnalyzer.setStreamCallback === 'function') {
             this.scopeAnalyzer.setStreamCallback(streamUpdate);
         }
@@ -120,18 +109,6 @@ class StatelessIntelligentFileModifier {
         if (this.astAnalyzer && typeof this.astAnalyzer.setStreamCallback === 'function') {
             this.astAnalyzer.setStreamCallback(streamUpdate);
         }
-        if (this.projectAnalyzer && typeof this.projectAnalyzer.setStreamCallback === 'function') {
-            this.projectAnalyzer.setStreamCallback(streamUpdate);
-        }
-        if (this.fullFileProcessor && typeof this.fullFileProcessor.setStreamCallback === 'function') {
-            this.fullFileProcessor.setStreamCallback(streamUpdate);
-        }
-        if (this.targetedNodesProcessor && typeof this.targetedNodesProcessor.setStreamCallback === 'function') {
-            this.targetedNodesProcessor.setStreamCallback(streamUpdate);
-        }
-        if (this.componentAdditionProcessor && typeof this.componentAdditionProcessor.setStreamCallback === 'function') {
-            this.componentAdditionProcessor.setStreamCallback(streamUpdate);
-        }
     }
     setStreamCallback(callback) {
         this.streamCallback = callback;
@@ -143,84 +120,78 @@ class StatelessIntelligentFileModifier {
         }
     }
     // ==============================================================
-    // SESSION MANAGEMENT
+    // SECURE SESSION MANAGEMENT
     // ==============================================================
     initializeSession() {
         return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('🚀 Initializing stateless session...');
-            this.streamUpdate(`📍 React Base Path: ${this.reactBasePath}`);
-            // Verify directory structure
-            const structureValid = yield this.verifyDirectoryStructure();
-            if (!structureValid) {
-                throw new Error(`Directory structure is invalid: ${this.reactBasePath}`);
+            this.streamUpdate('🔒 Initializing SECURE session...');
+            // Security check: Verify src directory exists and is accessible
+            const srcPath = path.join(this.reactBasePath, 'src');
+            try {
+                yield fs_1.promises.access(srcPath, fs_1.promises.constants.R_OK | fs_1.promises.constants.W_OK);
+                this.streamUpdate(`✅ SECURE: src directory verified at ${srcPath}`);
+            }
+            catch (error) {
+                throw new Error(`SECURITY: src directory not accessible: ${srcPath}`);
+            }
+            // Verify no path traversal in base path
+            const resolvedBase = path.resolve(this.reactBasePath);
+            if (resolvedBase !== this.reactBasePath) {
+                this.streamUpdate(`🔧 Path normalized: ${this.reactBasePath} → ${resolvedBase}`);
+                this.reactBasePath = resolvedBase;
             }
             const existingStartTime = yield this.redis.getSessionStartTime(this.sessionId);
             if (!existingStartTime) {
                 yield this.redis.setSessionStartTime(this.sessionId, new Date().toISOString());
             }
-            // Build project tree
-            this.streamUpdate('🔄 Building project tree...');
-            yield this.buildProjectTree();
+            // Build project tree with security
+            this.streamUpdate('🔄 Building SECURE project tree (src only)...');
+            yield this.buildSecureProjectTree();
         });
     }
-    verifyDirectoryStructure() {
+    buildSecureProjectTree() {
         return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('🏗️ Verifying directory structure...');
-            try {
-                yield fs_1.promises.access(this.reactBasePath);
-                this.streamUpdate(`✅ Directory exists: ${this.reactBasePath}`);
-                return true;
-            }
-            catch (error) {
-                this.streamUpdate(`❌ Directory does not exist: ${this.reactBasePath}`);
-                return false;
-            }
-        });
-    }
-    buildProjectTree() {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('📂 Analyzing React project structure...');
+            this.streamUpdate('📂 Analyzing React project structure with security restrictions...');
             try {
                 let projectFiles = new Map();
-                // Update dependency manager
-                const currentProjectFiles = yield this.getProjectFiles();
-                this.dependencyManager = new dependancy_1.DependencyManager(currentProjectFiles);
-                // Use project analyzer
-                yield this.projectAnalyzer.buildProjectTree(projectFiles, this.dependencyManager, (message) => this.streamUpdate(message));
+                // Use SECURE project analyzer - only scans src folder
+                yield this.safeProjectAnalyzer.buildProjectTreeSafely(projectFiles);
                 if (projectFiles.size === 0) {
-                    throw new Error('No React files found in directory');
+                    throw new Error('No valid React files found in src directory');
                 }
-                // CRITICAL: Update all file paths to current reactBasePath
-                const fixedProjectFiles = new Map();
-                for (const [relativePath, file] of projectFiles) {
-                    const currentFilePath = this.resolveCurrentFilePath(relativePath);
-                    const fixedFile = Object.assign(Object.assign({}, file), { path: currentFilePath // Use current build directory path
-                     });
-                    fixedProjectFiles.set(relativePath, fixedFile);
-                    this.streamUpdate(`🔧 Fixed path: ${relativePath} → ${currentFilePath}`);
-                }
-                // Store fixed paths in Redis
-                yield this.setProjectFiles(fixedProjectFiles);
-                this.streamUpdate(`✅ Loaded ${fixedProjectFiles.size} React files with updated paths`);
+                // SECURITY: Clean and validate all file paths
+                const secureProjectFiles = this.pathManager.cleanProjectFilePaths(projectFiles);
+                // Update dependency manager with secure files
+                this.dependencyManager = new dependancy_1.DependencyManager(secureProjectFiles);
+                // Store secure paths in Redis
+                yield this.setProjectFiles(secureProjectFiles);
+                this.streamUpdate(`✅ SECURE: Loaded ${secureProjectFiles.size} validated React files from src/`);
+                this.streamUpdate(`🔒 All file paths verified to be within src/ directory only`);
             }
             catch (error) {
-                console.error('Error building project tree:', error);
+                console.error('Error building secure project tree:', error);
                 throw error;
             }
         });
     }
     // ==============================================================
-    // REDIS OPERATIONS (Simplified)
+    // SECURE REDIS OPERATIONS
     // ==============================================================
     getProjectFiles() {
         return __awaiter(this, void 0, void 0, function* () {
             const projectFiles = yield this.redis.getProjectFiles(this.sessionId);
-            return projectFiles || new Map();
+            if (projectFiles && projectFiles.size > 0) {
+                // SECURITY: Re-validate all cached paths
+                return this.pathManager.cleanProjectFilePaths(projectFiles);
+            }
+            return new Map();
         });
     }
     setProjectFiles(projectFiles) {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.redis.setProjectFiles(this.sessionId, projectFiles);
+            // SECURITY: Clean paths before storing
+            const secureFiles = this.pathManager.cleanProjectFilePaths(projectFiles);
+            yield this.redis.setProjectFiles(this.sessionId, secureFiles);
         });
     }
     getModificationSummary() {
@@ -228,134 +199,381 @@ class StatelessIntelligentFileModifier {
             return new modification_1.RedisModificationSummary(this.redis, this.sessionId);
         });
     }
-    getModificationContextualSummary() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const modificationSummary = yield this.getModificationSummary();
-            return yield modificationSummary.getContextualSummary();
-        });
-    }
-    getMostModifiedFiles() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const modificationSummary = yield this.getModificationSummary();
-            return yield modificationSummary.getMostModifiedFiles();
-        });
-    }
     // ==============================================================
-    // MODIFICATION HANDLERS
+    // SECURE MODIFICATION HANDLERS
     // ==============================================================
-    handleComponentAddition(prompt, scope, projectSummaryCallback) {
+    handleSecureComponentAddition(prompt, scope, projectSummaryCallback) {
         return __awaiter(this, void 0, void 0, function* () {
+            this.streamUpdate('🔒 SECURE component addition workflow...');
             const projectFiles = yield this.getProjectFiles();
             const modificationSummary = yield this.getModificationSummary();
-            return yield this.componentAdditionProcessor.handleComponentAddition(prompt, scope, projectFiles, modificationSummary, this.componentGenerationSystem, projectSummaryCallback);
+            // Extract component name and type
+            const componentName = yield this.extractComponentNameSecurely(prompt);
+            const componentType = this.determineComponentType(prompt);
+            this.streamUpdate(`🔒 Creating SECURE ${componentType}: ${componentName}`);
+            // Generate component content (this is safe as it's just text generation)
+            const componentContent = yield this.generateComponentContentSecurely(componentName, componentType, prompt);
+            if (!componentContent) {
+                return {
+                    success: false,
+                    error: 'Failed to generate component content',
+                    selectedFiles: [],
+                    addedFiles: []
+                };
+            }
+            // SECURE file creation
+            const createResult = yield this.safeComponentAdditionProcessor.createComponentSafely(componentName, componentType, componentContent);
+            if (!createResult.success) {
+                return {
+                    success: false,
+                    error: createResult.error,
+                    selectedFiles: [],
+                    addedFiles: []
+                };
+            }
+            let updatedFiles = [];
+            // For pages, update App.tsx securely
+            if (componentType === 'page') {
+                this.streamUpdate('🔒 Updating App.tsx securely...');
+                const appContent = yield this.generateAppUpdateContentSecurely(componentName, projectFiles);
+                if (appContent) {
+                    const appUpdateResult = yield this.safeComponentAdditionProcessor.updateAppSafely(projectFiles, componentName, appContent);
+                    if (appUpdateResult.success && appUpdateResult.updatedFiles) {
+                        updatedFiles = appUpdateResult.updatedFiles;
+                    }
+                }
+            }
+            // Update modification summary
+            const relativePath = `src/${componentType === 'page' ? 'pages' : 'components'}/${componentName}.tsx`;
+            modificationSummary.addChange('created', relativePath, `Created secure ${componentType}: ${componentName}`);
+            updatedFiles.forEach(file => {
+                modificationSummary.addChange('updated', file, `Updated for ${componentName} integration`);
+            });
+            return {
+                success: true,
+                selectedFiles: updatedFiles,
+                addedFiles: [relativePath],
+                approach: 'COMPONENT_ADDITION',
+                reasoning: `Successfully created ${componentName} ${componentType} with secure path validation`,
+                modificationSummary: yield modificationSummary.getSummary(),
+                tokenUsage: this.tokenTracker.getStats()
+            };
         });
     }
-    handleFullFileModification(prompt) {
+    handleSecureFullFileModification(prompt) {
         return __awaiter(this, void 0, void 0, function* () {
+            this.streamUpdate('🔒 SECURE full file modification workflow...');
             const projectFiles = yield this.getProjectFiles();
             const modificationSummary = yield this.getModificationSummary();
+            if (projectFiles.size === 0) {
+                this.streamUpdate('❌ No secure files available for modification');
+                return false;
+            }
             try {
-                let result = false;
-                if (this.fullFileProcessor && 'handleFullFileModification' in this.fullFileProcessor &&
-                    typeof this.fullFileProcessor.handleFullFileModification === 'function') {
-                    result = yield this.fullFileProcessor.handleFullFileModification(prompt, projectFiles, modificationSummary);
+                let modifiedCount = 0;
+                const RELEVANCE_THRESHOLD = 70;
+                // Analyze each file for relevance (already secure files)
+                for (const [relativePath, file] of projectFiles) {
+                    // Double-check security for each file
+                    const verification = yield this.pathManager.verifyFileInSrc(relativePath);
+                    if (!verification.isValid) {
+                        this.streamUpdate(`🚨 SECURITY: Skipping invalid path ${relativePath}`);
+                        continue;
+                    }
+                    // Get AST nodes for analysis
+                    const astNodes = this.astAnalyzer.parseFileWithAST(relativePath, projectFiles);
+                    if (astNodes.length === 0) {
+                        continue;
+                    }
+                    // Analyze relevance
+                    const relevanceResult = yield this.astAnalyzer.analyzeFileRelevance(prompt, relativePath, astNodes, 'FULL_FILE', projectFiles, this.anthropic, this.tokenTracker);
+                    if (relevanceResult.isRelevant && relevanceResult.relevanceScore >= RELEVANCE_THRESHOLD) {
+                        this.streamUpdate(`✅ SECURE: Modifying ${relativePath} (score: ${relevanceResult.relevanceScore})`);
+                        // Generate modified content
+                        const modifiedContent = yield this.generateModifiedContentSecurely(file, prompt, relevanceResult.reasoning);
+                        if (modifiedContent) {
+                            // SECURE file modification
+                            const modifyResult = yield this.safeFullFileProcessor.modifyFileSafely(relativePath, modifiedContent, projectFiles);
+                            if (modifyResult.success) {
+                                modifiedCount++;
+                                yield modificationSummary.addChange('modified', relativePath, `Secure modification: ${prompt.substring(0, 50)}...`);
+                                this.streamUpdate(`✅ SECURE: Modified ${relativePath}`);
+                            }
+                            else {
+                                this.streamUpdate(`❌ SECURE: Failed to modify ${relativePath}: ${modifyResult.error}`);
+                            }
+                        }
+                    }
                 }
-                else {
-                    this.streamUpdate('⚠️ Using fallback full file modification method');
-                    this.streamUpdate('❌ Full file processor method not available - modification skipped');
-                    return false;
-                }
-                if (result) {
+                // Update project files cache
+                if (modifiedCount > 0) {
                     yield this.setProjectFiles(projectFiles);
                 }
-                return result;
+                this.streamUpdate(`🔒 SECURE full file modification complete: ${modifiedCount} files modified`);
+                return modifiedCount > 0;
             }
             catch (error) {
-                this.streamUpdate(`❌ Full file modification failed: ${error}`);
+                this.streamUpdate(`❌ SECURE full file modification failed: ${error}`);
                 return false;
             }
         });
     }
-    handleTargetedModification(prompt) {
+    // ==============================================================
+    // SECURE CONTENT GENERATION HELPERS
+    // ==============================================================
+    extractComponentNameSecurely(prompt) {
         return __awaiter(this, void 0, void 0, function* () {
-            const projectFiles = yield this.getProjectFiles();
-            const modificationSummary = yield this.getModificationSummary();
+            // Safe AI extraction - no file system operations
+            const extractionPrompt = `Extract component name from: "${prompt}". Return only the PascalCase name, nothing else.`;
             try {
-                let result = false;
-                if (this.targetedNodesProcessor && 'handleTargetedModification' in this.targetedNodesProcessor &&
-                    typeof this.targetedNodesProcessor.handleTargetedModification === 'function') {
-                    result = yield this.targetedNodesProcessor.handleTargetedModification(prompt, projectFiles, modificationSummary);
+                const response = yield this.anthropic.messages.create({
+                    model: 'claude-3-5-sonnet-20240620',
+                    max_tokens: 30,
+                    temperature: 0,
+                    messages: [{ role: 'user', content: extractionPrompt }],
+                });
+                this.tokenTracker.logUsage(response.usage, 'Secure Component Name Extraction');
+                const firstBlock = response.content[0];
+                if ((firstBlock === null || firstBlock === void 0 ? void 0 : firstBlock.type) === 'text') {
+                    let name = firstBlock.text.trim().replace(/[^a-zA-Z]/g, '');
+                    if (name && name.length > 0) {
+                        return name.charAt(0).toUpperCase() + name.slice(1);
+                    }
                 }
-                else {
-                    this.streamUpdate('⚠️ Using fallback targeted modification method');
-                    this.streamUpdate('❌ Targeted nodes processor method not available - modification skipped');
-                    return false;
-                }
-                if (result) {
-                    yield this.setProjectFiles(projectFiles);
-                }
-                return result;
             }
             catch (error) {
-                this.streamUpdate(`❌ Targeted modification failed: ${error}`);
-                return false;
+                this.streamUpdate(`⚠️ AI extraction failed: ${error}`);
             }
+            // Fallback pattern matching
+            return this.fallbackExtractComponentName(prompt);
+        });
+    }
+    fallbackExtractComponentName(prompt) {
+        const patterns = [
+            /create.*?([A-Za-z]+).*?page/i,
+            /add.*?([A-Za-z]+).*?component/i,
+            /make.*?([A-Za-z]+)/i,
+            /([A-Za-z]+).*?page/i,
+            /([A-Za-z]+).*?component/i
+        ];
+        for (const pattern of patterns) {
+            const match = prompt.match(pattern);
+            if (match && match[1] && match[1].length > 2) {
+                return match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
+            }
+        }
+        return 'NewComponent';
+    }
+    determineComponentType(prompt) {
+        return /page|route|screen|view/i.test(prompt) ? 'page' : 'component';
+    }
+    generateComponentContentSecurely(componentName, componentType, prompt) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Safe content generation - no file operations
+            const generationPrompt = `
+Create a React TypeScript ${componentType} named ${componentName}.
+
+Requirements:
+- Use TypeScript (.tsx)
+- Export as default
+- Include basic functionality based on: "${prompt}"
+- Use modern React with hooks
+- Include basic styling with Tailwind classes
+- Keep it simple and functional
+
+Return ONLY the complete component code:
+`;
+            try {
+                const response = yield this.anthropic.messages.create({
+                    model: 'claude-3-5-sonnet-20240620',
+                    max_tokens: 2000,
+                    temperature: 0,
+                    messages: [{ role: 'user', content: generationPrompt }],
+                });
+                this.tokenTracker.logUsage(response.usage, `Secure Component Generation: ${componentName}`);
+                const firstBlock = response.content[0];
+                if ((firstBlock === null || firstBlock === void 0 ? void 0 : firstBlock.type) === 'text') {
+                    const text = firstBlock.text;
+                    const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+                    return codeMatch ? codeMatch[1].trim() : text.trim();
+                }
+            }
+            catch (error) {
+                this.streamUpdate(`❌ Component generation failed: ${error}`);
+            }
+            return null;
+        });
+    }
+    generateAppUpdateContentSecurely(componentName, projectFiles) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Find App.tsx safely
+            const appFile = projectFiles.get('src/App.tsx') || projectFiles.get('src/App.jsx');
+            if (!appFile) {
+                return null;
+            }
+            const updatePrompt = `
+Update this App.tsx file to include routing for new page component ${componentName}:
+
+Current App.tsx:
+\`\`\`tsx
+${appFile.content}
+\`\`\`
+
+Requirements:
+1. Add import for ${componentName} from './pages/${componentName}'
+2. Add route for /${componentName.toLowerCase()} 
+3. Add React Router imports if not present
+4. Wrap in BrowserRouter if needed
+5. Preserve all existing functionality
+
+Return ONLY the complete updated App.tsx:
+`;
+            try {
+                const response = yield this.anthropic.messages.create({
+                    model: 'claude-3-5-sonnet-20240620',
+                    max_tokens: 3000,
+                    temperature: 0,
+                    messages: [{ role: 'user', content: updatePrompt }],
+                });
+                this.tokenTracker.logUsage(response.usage, 'Secure App.tsx Update');
+                const firstBlock = response.content[0];
+                if ((firstBlock === null || firstBlock === void 0 ? void 0 : firstBlock.type) === 'text') {
+                    const text = firstBlock.text;
+                    const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+                    return codeMatch ? codeMatch[1].trim() : null;
+                }
+            }
+            catch (error) {
+                this.streamUpdate(`❌ App.tsx update generation failed: ${error}`);
+            }
+            return null;
+        });
+    }
+    generateModifiedContentSecurely(file, prompt, reasoning) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const modificationPrompt = `
+Modify this React file based on the user request:
+
+USER REQUEST: "${prompt}"
+WHY THIS FILE: ${reasoning}
+
+CURRENT FILE (${file.relativePath}):
+\`\`\`tsx
+${file.content}
+\`\`\`
+
+Requirements:
+1. Preserve ALL imports and exports exactly
+2. Keep component structure intact
+3. Only modify what's necessary for the request
+4. Maintain TypeScript types
+5. Keep existing functionality
+
+Return ONLY the complete modified file:
+`;
+            try {
+                const response = yield this.anthropic.messages.create({
+                    model: 'claude-3-5-sonnet-20240620',
+                    max_tokens: 4000,
+                    temperature: 0,
+                    messages: [{ role: 'user', content: modificationPrompt }],
+                });
+                this.tokenTracker.logUsage(response.usage, `Secure File Modification: ${file.relativePath}`);
+                const firstBlock = response.content[0];
+                if ((firstBlock === null || firstBlock === void 0 ? void 0 : firstBlock.type) === 'text') {
+                    const text = firstBlock.text;
+                    const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+                    return codeMatch ? codeMatch[1].trim() : null;
+                }
+            }
+            catch (error) {
+                this.streamUpdate(`❌ Content modification failed: ${error}`);
+            }
+            return null;
         });
     }
     // ==============================================================
-    // MAIN PROCESSING METHOD
+    // MAIN SECURE PROCESSING METHOD
     // ==============================================================
     processModification(prompt, conversationContext, dbSummary, projectSummaryCallback) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                this.streamUpdate('🚀 Starting stateless intelligent modification workflow...');
+                this.streamUpdate('🔒 Starting SECURE intelligent modification workflow...');
                 yield this.initializeSession();
                 const projectFiles = yield this.getProjectFiles();
                 if (projectFiles.size === 0) {
                     return {
                         success: false,
-                        error: 'No React files found in directory',
+                        error: 'No secure React files found in src directory',
                         selectedFiles: [],
                         addedFiles: []
                     };
                 }
                 // Build project summary for scope analysis
-                const projectSummary = dbSummary || this.projectAnalyzer.buildProjectSummary(projectFiles);
+                const projectSummary = dbSummary || this.buildProjectSummary(projectFiles);
                 const contextWithSummary = (conversationContext || '') + '\n\n' + (yield this.getModificationContextualSummary());
                 // Analyze scope
                 const scope = yield this.scopeAnalyzer.analyzeScope(prompt, projectSummary, contextWithSummary, dbSummary);
-                this.streamUpdate(`📋 Modification method: ${scope.scope}`);
-                // Prepare for component generation if needed
-                if (scope.scope === 'COMPONENT_ADDITION') {
-                    if (typeof this.componentGenerationSystem.refreshFileStructure === 'function') {
-                        yield this.componentGenerationSystem.refreshFileStructure();
-                    }
-                    if (dbSummary && typeof this.componentGenerationSystem.setProjectSummary === 'function') {
-                        this.componentGenerationSystem.setProjectSummary(dbSummary);
-                    }
-                }
-                // Execute the chosen approach
-                let success = false;
-                let selectedFiles = [];
-                let addedFiles = [];
+                this.streamUpdate(`📋 SECURE modification method: ${scope.scope}`);
+                // Execute the chosen approach securely
                 switch (scope.scope) {
                     case 'COMPONENT_ADDITION':
-                        const componentResult = yield this.handleComponentAddition(prompt, scope, projectSummaryCallback);
-                        // Write component addition changes to files
-                        if (componentResult.success) {
-                            yield this.writeChangesToFiles();
-                        }
+                        const componentResult = yield this.handleSecureComponentAddition(prompt, scope, projectSummaryCallback);
                         return componentResult;
                     case 'FULL_FILE':
-                        success = yield this.handleFullFileModification(prompt);
-                        const fullFileModifications = yield this.getMostModifiedFiles();
-                        selectedFiles = fullFileModifications.map(item => item.file);
-                        break;
+                        const success = yield this.handleSecureFullFileModification(prompt);
+                        if (success) {
+                            const modificationSummary = yield this.getModificationContextualSummary();
+                            const mostModified = yield this.getMostModifiedFiles();
+                            return {
+                                success: true,
+                                selectedFiles: mostModified.map(item => item.file),
+                                addedFiles: [],
+                                approach: 'FULL_FILE',
+                                reasoning: `${scope.reasoning} Secure modification of files within src/ only.`,
+                                modificationSummary,
+                                tokenUsage: this.tokenTracker.getStats()
+                            };
+                        }
+                        else {
+                            return {
+                                success: false,
+                                error: 'Secure full file modification failed',
+                                selectedFiles: [],
+                                addedFiles: [],
+                                approach: 'FULL_FILE',
+                                reasoning: scope.reasoning,
+                                tokenUsage: this.tokenTracker.getStats()
+                            };
+                        }
                     case 'TARGETED_NODES':
-                        success = yield this.handleTargetedModification(prompt);
-                        const targetedModifications = yield this.getMostModifiedFiles();
-                        selectedFiles = targetedModifications.map(item => item.file);
-                        break;
+                        // For now, fall back to full file for targeted modifications
+                        this.streamUpdate('🔒 Using secure full file modification for targeted changes...');
+                        const targetedSuccess = yield this.handleSecureFullFileModification(prompt);
+                        if (targetedSuccess) {
+                            const modificationSummary = yield this.getModificationContextualSummary();
+                            const mostModified = yield this.getMostModifiedFiles();
+                            return {
+                                success: true,
+                                selectedFiles: mostModified.map(item => item.file),
+                                addedFiles: [],
+                                approach: 'TARGETED_NODES',
+                                reasoning: `${scope.reasoning} Secure targeted modification within src/ only.`,
+                                modificationSummary,
+                                tokenUsage: this.tokenTracker.getStats()
+                            };
+                        }
+                        else {
+                            return {
+                                success: false,
+                                error: 'Secure targeted modification failed',
+                                selectedFiles: [],
+                                addedFiles: [],
+                                approach: 'TARGETED_NODES',
+                                reasoning: scope.reasoning,
+                                tokenUsage: this.tokenTracker.getStats()
+                            };
+                        }
                     default:
                         return {
                             success: false,
@@ -364,35 +582,9 @@ class StatelessIntelligentFileModifier {
                             addedFiles: []
                         };
                 }
-                // Return results
-                if (success) {
-                    const modificationSummary = yield this.getModificationContextualSummary();
-                    // CRITICAL: Write Redis changes back to actual files
-                    yield this.writeChangesToFiles();
-                    return {
-                        success: true,
-                        selectedFiles,
-                        addedFiles,
-                        approach: scope.scope,
-                        reasoning: `${scope.reasoning} Stateless AST analysis identified ${selectedFiles.length} files for modification.`,
-                        modificationSummary,
-                        tokenUsage: this.tokenTracker.getStats()
-                    };
-                }
-                else {
-                    return {
-                        success: false,
-                        error: 'Modification process failed',
-                        selectedFiles: [],
-                        addedFiles: [],
-                        approach: scope.scope,
-                        reasoning: scope.reasoning,
-                        tokenUsage: this.tokenTracker.getStats()
-                    };
-                }
             }
             catch (error) {
-                console.error('❌ Stateless modification process failed:', error);
+                console.error('❌ SECURE modification process failed:', error);
                 return {
                     success: false,
                     error: error instanceof Error ? error.message : 'Unknown error occurred',
@@ -406,127 +598,25 @@ class StatelessIntelligentFileModifier {
     // ==============================================================
     // UTILITY METHODS
     // ==============================================================
-    /**
-     * Write Redis cached changes back to actual files
-     */
-    writeChangesToFiles() {
+    buildProjectSummary(projectFiles) {
+        const totalFiles = projectFiles.size;
+        const componentFiles = Array.from(projectFiles.keys()).filter(path => path.includes('.tsx') || path.includes('.jsx')).length;
+        const keyFiles = Array.from(projectFiles.keys())
+            .filter(path => path.includes('App.') || path.includes('index.') || path.includes('main.'))
+            .slice(0, 3);
+        return `Secure React TypeScript project with ${totalFiles} files (${componentFiles} components) in src/ directory. Key files: ${keyFiles.join(', ')}.`;
+    }
+    getModificationContextualSummary() {
         return __awaiter(this, void 0, void 0, function* () {
-            var _a;
-            this.streamUpdate('💾 Starting to write Redis cached changes back to actual files...');
-            this.streamUpdate(`📍 Base directory: ${this.reactBasePath}`);
-            try {
-                const projectFiles = yield this.getProjectFiles();
-                this.streamUpdate(`📦 Found ${projectFiles.size} files in Redis cache`);
-                if (projectFiles.size === 0) {
-                    this.streamUpdate('⚠️ No files found in Redis cache to write');
-                    return;
-                }
-                let filesWritten = 0;
-                let filesSkipped = 0;
-                for (const [relativePath, projectFile] of projectFiles.entries()) {
-                    this.streamUpdate(`\n🔍 Processing: ${relativePath}`);
-                    this.streamUpdate(`   Has content: ${!!projectFile.content}`);
-                    this.streamUpdate(`   Content length: ${((_a = projectFile.content) === null || _a === void 0 ? void 0 : _a.length) || 0}`);
-                    if (projectFile.content) {
-                        try {
-                            // CRITICAL FIX: Use current reactBasePath, not cached paths
-                            const currentFilePath = this.resolveCurrentFilePath(relativePath);
-                            // Debug: Log the path resolution
-                            this.streamUpdate(`🔧 Path resolution:`);
-                            this.streamUpdate(`   Input: ${relativePath}`);
-                            this.streamUpdate(`   Output: ${currentFilePath}`);
-                            this.streamUpdate(`   Base: ${this.reactBasePath}`);
-                            // Ensure directory exists
-                            const dir = path.dirname(currentFilePath);
-                            this.streamUpdate(`📁 Ensuring directory exists: ${dir}`);
-                            yield fs_1.promises.mkdir(dir, { recursive: true });
-                            // Check if target file already exists
-                            const existsBefore = yield fs_1.promises.access(currentFilePath).then(() => true).catch(() => false);
-                            this.streamUpdate(`   File exists before write: ${existsBefore}`);
-                            // Write the updated content to the actual file in current temp-build
-                            this.streamUpdate(`💾 Writing ${projectFile.content.length} characters to file...`);
-                            yield fs_1.promises.writeFile(currentFilePath, projectFile.content, 'utf8');
-                            // Verify the file was written
-                            const stats = yield fs_1.promises.stat(currentFilePath);
-                            const existsAfter = yield fs_1.promises.access(currentFilePath).then(() => true).catch(() => false);
-                            this.streamUpdate(`✅ SUCCESS: Written to ${currentFilePath}`);
-                            this.streamUpdate(`   File size: ${stats.size} bytes`);
-                            this.streamUpdate(`   Modified: ${stats.mtime}`);
-                            this.streamUpdate(`   Exists after write: ${existsAfter}`);
-                            filesWritten++;
-                        }
-                        catch (writeError) {
-                            this.streamUpdate(`❌ FAILED to write ${relativePath}:`);
-                            this.streamUpdate(`   Error: ${writeError}`);
-                            console.error(`Failed to write file ${relativePath}:`, writeError);
-                        }
-                    }
-                    else {
-                        this.streamUpdate(`⚠️ SKIPPED ${relativePath}: No content`);
-                        filesSkipped++;
-                    }
-                }
-                this.streamUpdate(`\n📊 Write Summary:`);
-                this.streamUpdate(`   Files written: ${filesWritten}`);
-                this.streamUpdate(`   Files skipped: ${filesSkipped}`);
-                this.streamUpdate(`   Total processed: ${projectFiles.size}`);
-                // Additional verification: List what's actually in the temp directory
-                try {
-                    this.streamUpdate(`\n🔍 Verifying temp directory structure:`);
-                    const srcPath = path.join(this.reactBasePath, 'src');
-                    const srcExists = yield fs_1.promises.access(srcPath).then(() => true).catch(() => false);
-                    this.streamUpdate(`   src/ exists: ${srcExists} at ${srcPath}`);
-                    if (srcExists) {
-                        const srcFiles = yield fs_1.promises.readdir(srcPath, { recursive: true });
-                        this.streamUpdate(`   Files in src/: ${srcFiles.length}`);
-                        this.streamUpdate(`   First 10 files: ${srcFiles.slice(0, 10).join(', ')}`);
-                        // Check specific modified files
-                        const modifiedFiles = ['pages/TodoApp.tsx', 'components/TodoFilters.tsx'];
-                        for (const file of modifiedFiles) {
-                            const filePath = path.join(srcPath, file);
-                            const exists = yield fs_1.promises.access(filePath).then(() => true).catch(() => false);
-                            if (exists) {
-                                const stats = yield fs_1.promises.stat(filePath);
-                                this.streamUpdate(`   ✅ ${file}: ${stats.size} bytes, modified ${stats.mtime}`);
-                            }
-                            else {
-                                this.streamUpdate(`   ❌ ${file}: NOT FOUND at ${filePath}`);
-                            }
-                        }
-                    }
-                    else {
-                        this.streamUpdate(`❌ src directory doesn't exist at: ${srcPath}`);
-                        // Check what's in the base directory
-                        const baseFiles = yield fs_1.promises.readdir(this.reactBasePath);
-                        this.streamUpdate(`   Files in base directory: ${baseFiles.join(', ')}`);
-                    }
-                }
-                catch (verifyError) {
-                    this.streamUpdate(`⚠️ Could not verify directory structure: ${verifyError}`);
-                }
-            }
-            catch (error) {
-                this.streamUpdate(`❌ Error writing changes to files: ${error}`);
-                console.error('Error writing changes to files:', error);
-                throw error;
-            }
+            const modificationSummary = yield this.getModificationSummary();
+            return yield modificationSummary.getContextualSummary();
         });
     }
-    /**
-     * Resolve file path to current build directory
-     */
-    resolveCurrentFilePath(relativePath) {
-        // Clean the relative path and normalize separators
-        const cleanPath = relativePath.replace(/^[\/\\]+/, '').replace(/\\/g, '/');
-        // Handle different path patterns
-        if (cleanPath.startsWith('src/')) {
-            // Path already includes src, use directly
-            return path.join(this.reactBasePath, cleanPath);
-        }
-        else {
-            // Assume it's a file in src directory
-            return path.join(this.reactBasePath, 'src', cleanPath);
-        }
+    getMostModifiedFiles() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const modificationSummary = yield this.getModificationSummary();
+            return yield modificationSummary.getMostModifiedFiles();
+        });
     }
     cleanup() {
         return __awaiter(this, void 0, void 0, function* () {
