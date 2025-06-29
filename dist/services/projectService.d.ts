@@ -1,4 +1,4 @@
-import { type Project, type NewProject } from "../db/schema";
+import { type Project, type NewProject } from "../db/project_schema";
 declare class ProjectService {
     createProject(projectData: NewProject): Promise<Project>;
     getProjectsByUserId(userId: number): Promise<Project[]>;

@@ -14,7 +14,7 @@ import {
   TokenUsageStats,
   ValidationResult
 } from '../filemodifier/types';
-import { ModificationSummary } from '../filemodifier/modification';
+import { RedisModificationSummary } from '../filemodifier/modification';
 import { ComponentGenerationSystem } from '../filemodifier/component';
 import { TokenTracker } from '../../utils/TokenTracer';
 import { 
@@ -69,7 +69,7 @@ export class ComponentAdditionProcessor {
     prompt: string,
     scope: ModificationScope,
     projectFiles: Map<string, ProjectFile>,
-    modificationSummary: ModificationSummary,
+    modificationSummary: RedisModificationSummary,
     componentGenerationSystem: ComponentGenerationSystem,
     projectSummaryCallback?: (summary: string, prompt: string) => Promise<string | null>
   ): Promise<ModificationResult> {
@@ -141,21 +141,22 @@ export class ComponentAdditionProcessor {
       this.streamUpdate(`🎉 Component addition complete!`);
       
       return {
-        success: true,
-        selectedFiles: updatedFiles,
-        addedFiles: [generationResult.generatedFile || filePath],
-        approach: 'COMPONENT_ADDITION',
-        reasoning: `Successfully created ${extractedName} ${componentType} with proper naming and integration. ${componentType === 'page' ? 'Updated App.tsx with routing.' : ''}`,
-        modificationSummary: modificationSummary.getSummary(),
-        componentGenerationResult: {
-          success: true,
-          generatedFile: generationResult.generatedFile || filePath,
-          updatedFiles,
-          integrationPath: 'app',
-          projectSummary: ''
-        },
-        tokenUsage: tokenStats
-      };
+  success: true,
+  selectedFiles: updatedFiles,
+  addedFiles: [generationResult.generatedFile || filePath],
+  approach: 'COMPONENT_ADDITION',
+  reasoning: `Successfully created ${extractedName} ${componentType} with proper naming and integration. ${componentType === 'page' ? 'Updated App.tsx with routing.' : ''}`,
+  modificationSummary: await modificationSummary.getSummary(), // <-- ✅ Fix applied here
+  componentGenerationResult: {
+    success: true,
+    generatedFile: generationResult.generatedFile || filePath,
+    updatedFiles,
+    integrationPath: 'app',
+    projectSummary: ''
+  },
+  tokenUsage: tokenStats
+};
+
       
     } catch (error) {
       this.streamUpdate(`❌ Component addition failed: ${error}`);

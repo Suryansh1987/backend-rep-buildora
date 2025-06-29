@@ -1,4 +1,4 @@
-import { type Message, type NewMessage } from '../db/schema';
+import { type Message, type NewMessage } from '../db/project_schema';
 declare class MessageService {
     createMessage(messageData: NewMessage): Promise<Message>;
     getMessagesByProjectId(projectId: number): Promise<Message[]>;

@@ -1,43 +1,38 @@
 import Anthropic from '@anthropic-ai/sdk';
-interface CodeRange {
-    startLine: number;
-    endLine: number;
-    startColumn: number;
-    endColumn: number;
-    originalCode: string;
-}
-interface ModificationResult {
-    success: boolean;
-    selectedFiles?: string[];
-    approach?: 'FULL_FILE' | 'TARGETED_NODES';
-    modifiedRanges?: Array<{
-        file: string;
-        range: CodeRange;
-        modifiedCode: string;
-    }>;
-    error?: string;
-}
-export declare class IntelligentFileModifier {
+import { ModificationResult } from './filemodifier/types';
+export declare class StatelessIntelligentFileModifier {
     private anthropic;
     private reactBasePath;
-    private projectFiles;
-    constructor(anthropic: Anthropic, reactBasePath: string);
-    private buildProjectTree;
-    private analyzeFile;
-    private escapeRegExp;
-    private fallbackFileSearch;
-    private determineScopeForFallbackFiles;
+    private redis;
+    private sessionId;
+    private streamCallback?;
+    private scopeAnalyzer;
+    private componentGenerationSystem;
+    private dependencyManager;
+    private fallbackMechanism;
+    private astAnalyzer;
+    private projectAnalyzer;
+    private fullFileProcessor;
+    private targetedNodesProcessor;
+    private componentAdditionProcessor;
+    private tokenTracker;
+    constructor(anthropic: Anthropic, reactBasePath: string, sessionId: string, redisUrl?: string);
+    initializeSession(): Promise<void>;
+    clearSession(): Promise<void>;
+    private getProjectFiles;
+    private setProjectFiles;
+    private updateProjectFile;
+    private addModificationChange;
+    private getModificationContextualSummary;
+    private getMostModifiedFiles;
+    buildProjectTree(): Promise<void>;
+    setStreamCallback(callback: (message: string) => void): void;
+    private streamUpdate;
+    private handleComponentAddition;
     private handleFullFileModification;
-    private extractComponentName;
-    private checkForButtons;
-    private checkForSignin;
-    private isMainFile;
-    private buildProjectSummary;
-    private identifyRelevantFiles;
-    private parseFileWithAST;
-    private identifyTargetNodes;
-    private modifyCodeSnippets;
-    private applyModifications;
-    processModification(prompt: string): Promise<ModificationResult>;
+    private handleTargetedModification;
+    processModification(prompt: string, conversationContext?: string, dbSummary?: string, projectSummaryCallback?: (summary: string, prompt: string) => Promise<string | null>): Promise<ModificationResult>;
+    private getChangeIcon;
+    getRedisStats(): Promise<any>;
+    cleanup(): Promise<void>;
 }
-export {};

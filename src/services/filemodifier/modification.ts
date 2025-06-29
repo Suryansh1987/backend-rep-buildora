@@ -1,19 +1,20 @@
-// modificationSummary.ts - Complete module for tracking and summarizing changes
-
+// services/filemodifier/modification-redis.ts
 import { ModificationChange, ModificationSessionSummary } from './types';
+import { RedisService } from '../Redis';
 
-export class ModificationSummary {
-  private changes: ModificationChange[] = [];
-  private sessionStartTime: string;
+export class RedisModificationSummary {
+  private redis: RedisService;
+  private sessionId: string;
 
-  constructor() {
-    this.sessionStartTime = new Date().toISOString();
+  constructor(redis: RedisService, sessionId: string) {
+    this.redis = redis;
+    this.sessionId = sessionId;
   }
 
   /**
    * Add a new modification change to the tracking
    */
-  addChange(
+  async addChange(
     type: 'modified' | 'created' | 'updated',
     file: string,
     description: string,
@@ -24,7 +25,7 @@ export class ModificationSummary {
       componentsAffected?: string[];
       reasoning?: string;
     }
-  ): void {
+  ): Promise<void> {
     const change: ModificationChange = {
       type,
       file,
@@ -39,31 +40,41 @@ export class ModificationSummary {
       }
     };
 
-    this.changes.push(change);
+    await this.redis.addModificationChange(this.sessionId, change);
+  }
+
+  /**
+   * Get all changes for this session
+   */
+  async getChanges(): Promise<ModificationChange[]> {
+    return await this.redis.getModificationChanges(this.sessionId);
   }
 
   /**
    * Get a comprehensive summary of all modifications in this session
    */
-  getSummary(): string {
-    if (this.changes.length === 0) {
+  async getSummary(): Promise<string> {
+    const changes = await this.getChanges();
+    
+    if (changes.length === 0) {
       return "No changes recorded in this session.";
     }
 
-    const uniqueFiles = new Set(this.changes.map(c => c.file));
-    const successfulChanges = this.changes.filter(c => c.success !== false);
-    const failedChanges = this.changes.filter(c => c.success === false);
+    const uniqueFiles = new Set(changes.map(c => c.file));
+    const successfulChanges = changes.filter(c => c.success !== false);
+    const failedChanges = changes.filter(c => c.success === false);
+    const sessionStartTime = await this.redis.getSessionStartTime(this.sessionId);
 
     const summary = `
 **MODIFICATION SESSION SUMMARY:**
 📊 **Session Stats:**
-   • Total Changes: ${this.changes.length}
+   • Total Changes: ${changes.length}
    • Files Affected: ${uniqueFiles.size}
-   • Success Rate: ${Math.round((successfulChanges.length / this.changes.length) * 100)}%
-   • Session Duration: ${this.getSessionDuration()}
+   • Success Rate: ${Math.round((successfulChanges.length / changes.length) * 100)}%
+   • Session Duration: ${this.getSessionDuration(sessionStartTime)}
 
 📝 **Changes Made:**
-${this.changes.map((change, index) => {
+${changes.map((change, index) => {
   const icon = this.getChangeIcon(change);
   const status = change.success === false ? ' ❌' : change.success === true ? ' ✅' : '';
   return `   ${index + 1}. ${icon} ${change.file}${status}
@@ -73,7 +84,7 @@ ${this.changes.map((change, index) => {
 }).join('\n\n')}
 
 🕐 **Timeline:**
-   • Started: ${new Date(this.sessionStartTime).toLocaleTimeString()}
+   • Started: ${new Date(sessionStartTime).toLocaleTimeString()}
    • Completed: ${new Date().toLocaleTimeString()}
 
 ${failedChanges.length > 0 ? `
@@ -88,12 +99,17 @@ ${failedChanges.map(change => `   • ${change.file}: ${change.description}`).jo
   /**
    * Get a contextual summary for use in AI prompts
    */
-  getContextualSummary(): string {
-    if (this.changes.length === 0) {
+  async getContextualSummary(): Promise<string> {
+    const changes = await this.getChanges();
+    
+    if (changes.length === 0) {
       return "";
     }
 
-    const recentChanges = this.changes.slice(-5); // Last 5 changes
+    const recentChanges = changes.slice(-5); // Last 5 changes
+    const uniqueFiles = new Set(changes.map(c => c.file));
+    const sessionStartTime = await this.redis.getSessionStartTime(this.sessionId);
+    
     let summary = `
 **RECENT MODIFICATIONS IN THIS SESSION:**
 ${recentChanges.map(change => {
@@ -103,9 +119,9 @@ ${recentChanges.map(change => {
 }).join('\n')}
 
 **Session Context:**
-• Total files modified: ${new Set(this.changes.map(c => c.file)).size}
-• Primary approach: ${this.getPrimaryApproach()}
-• Session duration: ${this.getSessionDuration()}
+• Total files modified: ${uniqueFiles.size}
+• Primary approach: ${await this.getPrimaryApproach()}
+• Session duration: ${this.getSessionDuration(sessionStartTime)}
     `.trim();
 
     return summary;
@@ -114,18 +130,20 @@ ${recentChanges.map(change => {
   /**
    * Get detailed statistics about the modification session
    */
-  getDetailedStats(): ModificationSessionSummary {
-    const uniqueFiles = new Set(this.changes.map(c => c.file));
-    const successfulChanges = this.changes.filter(c => c.success !== false);
+  async getDetailedStats(): Promise<ModificationSessionSummary> {
+    const changes = await this.getChanges();
+    const uniqueFiles = new Set(changes.map(c => c.file));
+    const successfulChanges = changes.filter(c => c.success !== false);
+    const sessionStartTime = await this.redis.getSessionStartTime(this.sessionId);
     
     return {
-      changes: this.changes,
+      changes: changes,
       totalFiles: uniqueFiles.size,
-      totalChanges: this.changes.length,
-      approach: this.getPrimaryApproach(),
-      sessionDuration: this.getSessionDurationMinutes(),
-      successRate: this.changes.length > 0 ? Math.round((successfulChanges.length / this.changes.length) * 100) : 0,
-      startTime: this.sessionStartTime,
+      totalChanges: changes.length,
+      approach: await this.getPrimaryApproach(),
+      sessionDuration: this.getSessionDurationMinutes(sessionStartTime),
+      successRate: changes.length > 0 ? Math.round((successfulChanges.length / changes.length) * 100) : 0,
+      startTime: sessionStartTime,
       endTime: new Date().toISOString()
     };
   }
@@ -133,21 +151,23 @@ ${recentChanges.map(change => {
   /**
    * Get changes by type
    */
-  getChangesByType(): Record<string, ModificationChange[]> {
+  async getChangesByType(): Promise<Record<string, ModificationChange[]>> {
+    const changes = await this.getChanges();
     return {
-      created: this.changes.filter(c => c.type === 'created'),
-      modified: this.changes.filter(c => c.type === 'modified'),
-      updated: this.changes.filter(c => c.type === 'updated')
+      created: changes.filter(c => c.type === 'created'),
+      modified: changes.filter(c => c.type === 'modified'),
+      updated: changes.filter(c => c.type === 'updated')
     };
   }
 
   /**
    * Get changes by file
    */
-  getChangesByFile(): Record<string, ModificationChange[]> {
+  async getChangesByFile(): Promise<Record<string, ModificationChange[]>> {
+    const changes = await this.getChanges();
     const changesByFile: Record<string, ModificationChange[]> = {};
     
-    this.changes.forEach(change => {
+    changes.forEach(change => {
       if (!changesByFile[change.file]) {
         changesByFile[change.file] = [];
       }
@@ -160,10 +180,11 @@ ${recentChanges.map(change => {
   /**
    * Get the most frequently modified files
    */
-  getMostModifiedFiles(limit: number = 5): Array<{ file: string; count: number; types: string[] }> {
+  async getMostModifiedFiles(limit: number = 5): Promise<Array<{ file: string; count: number; types: string[] }>> {
+    const changes = await this.getChanges();
     const fileStats: Record<string, { count: number; types: Set<string> }> = {};
     
-    this.changes.forEach(change => {
+    changes.forEach(change => {
       if (!fileStats[change.file]) {
         fileStats[change.file] = { count: 0, types: new Set() };
       }
@@ -184,81 +205,83 @@ ${recentChanges.map(change => {
   /**
    * Get a user-friendly progress update
    */
-  getProgressUpdate(): string {
-    if (this.changes.length === 0) {
+  async getProgressUpdate(): Promise<string> {
+    const changes = await this.getChanges();
+    
+    if (changes.length === 0) {
       return "Session started - ready for modifications!";
     }
 
-    const lastChange = this.changes[this.changes.length - 1];
-    const uniqueFiles = new Set(this.changes.map(c => c.file)).size;
+    const lastChange = changes[changes.length - 1];
+    const uniqueFiles = new Set(changes.map(c => c.file)).size;
     const icon = this.getChangeIcon(lastChange);
     
-    return `${icon} Latest: ${lastChange.description} | ${this.changes.length} changes across ${uniqueFiles} files`;
+    return `${icon} Latest: ${lastChange.description} | ${changes.length} changes across ${uniqueFiles} files`;
   }
 
   /**
    * Export session data for persistence
    */
-  exportSession(): {
+  async exportSession(): Promise<{
     sessionId: string;
     startTime: string;
     endTime: string;
     changes: ModificationChange[];
     summary: ModificationSessionSummary;
-  } {
+  }> {
+    const changes = await this.getChanges();
+    const sessionStartTime = await this.redis.getSessionStartTime(this.sessionId);
+    
     return {
-      sessionId: this.generateSessionId(),
-      startTime: this.sessionStartTime,
+      sessionId: this.sessionId,
+      startTime: sessionStartTime,
       endTime: new Date().toISOString(),
-      changes: this.changes,
-      summary: this.getDetailedStats()
+      changes: changes,
+      summary: await this.getDetailedStats()
     };
   }
 
   /**
    * Clear all changes (start fresh session)
    */
-  clear(): void {
-    this.changes = [];
-    this.sessionStartTime = new Date().toISOString();
+  async clear(): Promise<void> {
+    await this.redis.setModificationChanges(this.sessionId, []);
+    await this.redis.setSessionStartTime(this.sessionId, new Date().toISOString());
   }
 
   /**
    * Get the number of changes
    */
-  getChangeCount(): number {
-    return this.changes.length;
+  async getChangeCount(): Promise<number> {
+    const changes = await this.getChanges();
+    return changes.length;
   }
 
   /**
    * Check if any changes have been made
    */
-  hasChanges(): boolean {
-    return this.changes.length > 0;
-  }
-
-  /**
-   * Get all changes
-   */
-  getAllChanges(): ModificationChange[] {
-    return [...this.changes];
+  async hasChanges(): Promise<boolean> {
+    const changes = await this.getChanges();
+    return changes.length > 0;
   }
 
   /**
    * Get recent changes
    */
-  getRecentChanges(limit: number = 5): ModificationChange[] {
-    return this.changes.slice(-limit);
+  async getRecentChanges(limit: number = 5): Promise<ModificationChange[]> {
+    const changes = await this.getChanges();
+    return changes.slice(-limit);
   }
 
   /**
    * Get changes within a time range
    */
-  getChangesInTimeRange(startTime: string, endTime: string): ModificationChange[] {
+  async getChangesInTimeRange(startTime: string, endTime: string): Promise<ModificationChange[]> {
+    const changes = await this.getChanges();
     const start = new Date(startTime).getTime();
     const end = new Date(endTime).getTime();
     
-    return this.changes.filter(change => {
+    return changes.filter(change => {
       const changeTime = new Date(change.timestamp).getTime();
       return changeTime >= start && changeTime <= end;
     });
@@ -267,15 +290,16 @@ ${recentChanges.map(change => {
   /**
    * Get success/failure statistics
    */
-  getSuccessStats(): {
+  async getSuccessStats(): Promise<{
     total: number;
     successful: number;
     failed: number;
     successRate: number;
-  } {
-    const total = this.changes.length;
-    const successful = this.changes.filter(c => c.success !== false).length;
-    const failed = this.changes.filter(c => c.success === false).length;
+  }> {
+    const changes = await this.getChanges();
+    const total = changes.length;
+    const successful = changes.filter(c => c.success !== false).length;
+    const failed = changes.filter(c => c.success === false).length;
     
     return {
       total,
@@ -296,11 +320,13 @@ ${recentChanges.map(change => {
     }
   }
 
-  private getPrimaryApproach(): string {
-    if (this.changes.length === 0) return 'None';
+  private async getPrimaryApproach(): Promise<string> {
+    const changes = await this.getChanges();
+    
+    if (changes.length === 0) return 'None';
     
     const approaches: Record<string, number> = {};
-    this.changes.forEach(change => {
+    changes.forEach(change => {
       if (change.approach) {
         approaches[change.approach] = (approaches[change.approach] || 0) + 1;
       }
@@ -312,8 +338,8 @@ ${recentChanges.map(change => {
     return sortedApproaches.length > 0 ? sortedApproaches[0][0] : 'Mixed';
   }
 
-  private getSessionDuration(): string {
-    const durationMs = new Date().getTime() - new Date(this.sessionStartTime).getTime();
+  private getSessionDuration(sessionStartTime: string): string {
+    const durationMs = new Date().getTime() - new Date(sessionStartTime).getTime();
     const minutes = Math.floor(durationMs / 60000);
     const seconds = Math.floor((durationMs % 60000) / 1000);
     
@@ -323,12 +349,8 @@ ${recentChanges.map(change => {
     return `${seconds}s`;
   }
 
-  private getSessionDurationMinutes(): number {
-    const durationMs = new Date().getTime() - new Date(this.sessionStartTime).getTime();
+  private getSessionDurationMinutes(sessionStartTime: string): number {
+    const durationMs = new Date().getTime() - new Date(sessionStartTime).getTime();
     return Math.floor(durationMs / 60000);
-  }
-
-  private generateSessionId(): string {
-    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 }

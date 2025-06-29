@@ -1,4 +1,4 @@
-// db/componentIntegratorSchema.ts - Component Integrator specific tables
+
 import { pgTable, uuid, text, integer, timestamp, boolean, varchar, index } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -9,7 +9,7 @@ export const messageSummaries = pgTable('ci_message_summaries', {
   messageCount: integer('message_count').notNull(),
   startTime: timestamp('start_time', { withTimezone: true }).notNull(),
   endTime: timestamp('end_time', { withTimezone: true }).notNull(),
-  keyTopics: text('key_topics').array(), // PostgreSQL array
+  keyTopics: text('key_topics').array(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({
   createdAtIdx: index('idx_ci_summaries_created_at').on(table.createdAt),
@@ -24,19 +24,19 @@ export const ciMessages = pgTable('ci_messages', {
   
   // Metadata for file modifications
   fileModifications: text('file_modifications').array(),
-  modificationApproach: varchar('modification_approach', { length: 20 }).$type<'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION'>(),
+  modificationApproach: varchar('modification_approach', { length: 30 }).$type<'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION' | 'FULL_FILE_GENERATION'>(),
   modificationSuccess: boolean('modification_success'),
   
   // Enhanced reasoning and context fields
-  reasoning: text('reasoning'), // Claude's reasoning for decisions
-  selectedFiles: text('selected_files').array(), // Files that were selected
-  errorDetails: text('error_details'), // Detailed error information
+  reasoning: text('reasoning'), // JSON string with metadata
+  selectedFiles: text('selected_files').array(),
+  errorDetails: text('error_details'),
   stepType: varchar('step_type', { length: 50 }).$type<'analysis' | 'modification' | 'result' | 'fallback' | 'user_request'>(),
   
   // Modification details
-  modificationRanges: text('modification_ranges'), // JSON string of modification ranges 
+  modificationRanges: text('modification_ranges'), // JSON string
   
-  // Reference to project summary (if applicable)
+  // Reference to project summary
   projectSummaryId: uuid('project_summary_id').references(() => projectSummaries.id),
 }, (table) => ({
   createdAtIdx: index('idx_ci_messages_created_at').on(table.createdAt.desc()),
@@ -44,9 +44,9 @@ export const ciMessages = pgTable('ci_messages', {
   projectSummaryIdIdx: index('idx_ci_messages_project_summary_id').on(table.projectSummaryId),
 }));
 
-// Conversation stats table (single row) for component integrator
+// ✅ FIXED: Conversation stats table - NO SERIAL TYPE
 export const conversationStats = pgTable('ci_conversation_stats', {
-  id: integer('id').primaryKey().default(1),
+  id: integer('id').primaryKey().default(1), // ✅ Using integer instead of serial
   totalMessageCount: integer('total_message_count').default(0),
   summaryCount: integer('summary_count').default(0),
   lastMessageAt: timestamp('last_message_at', { withTimezone: true }),
@@ -56,17 +56,23 @@ export const conversationStats = pgTable('ci_conversation_stats', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
-// Project summaries table for component integrator
+// ✅ ENHANCED: Project summaries table with ZIP URL support
 export const projectSummaries = pgTable('ci_project_summaries', {
   id: uuid('id').primaryKey().defaultRandom(),
-  summary: text('summary').notNull(), // The detailed project summary
-  originalPrompt: text('original_prompt').notNull(), // The prompt that generated this summary
-  isActive: boolean('is_active').default(true), // Is this the active summary for the project
+  summary: text('summary').notNull(),
+  originalPrompt: text('original_prompt').notNull(),
+  
+  // NEW FIELDS for ZIP-based workflow
+  zipUrl: text('zip_url'), // Store the source ZIP URL
+  buildId: text('build_id'), // Store the build ID
+  
+  isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-  lastUsedAt: timestamp('last_used_at', { withTimezone: true }).defaultNow(), // When was this summary last used
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }).defaultNow(),
 }, (table) => ({
   createdAtIdx: index('idx_ci_project_summaries_created_at').on(table.createdAt),
   isActiveIdx: index('idx_ci_project_summaries_is_active').on(table.isActive),
+  zipUrlIdx: index('idx_ci_project_summaries_zip_url').on(table.zipUrl),
 }));
 
 // Types for component integrator

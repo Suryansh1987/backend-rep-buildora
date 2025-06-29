@@ -1,17 +1,14 @@
-// ============================================================================
-// MAIN FILE: IntelligentFileModifier.ts
-// ============================================================================
-
+// services/filemodifier-redis.ts - Compatible version
 import Anthropic from '@anthropic-ai/sdk';
 import { 
   ProjectFile, 
   ASTNode, 
   ModificationResult, 
-  ModificationScope
+  ModificationScope,
+  ModificationChange
 } from './filemodifier/types';
 import { ScopeAnalyzer } from './filemodifier/scopeanalyzer';
 import { ComponentGenerationSystem } from './filemodifier/component';
-import { ModificationSummary } from './filemodifier/modification';
 import { DependencyManager } from './filemodifier/dependancy';
 import { FallbackMechanism } from './filemodifier/fallback';
 
@@ -22,17 +19,18 @@ import { FullFileProcessor } from './processor/Fullfileprocessor';
 import { TargetedNodesProcessor } from './processor/TargettedNodes';
 import { ComponentAdditionProcessor } from './processor/ComponentAddition';
 import { TokenTracker } from '../utils/TokenTracer';
+import { RedisService } from './Redis';
 
-export class IntelligentFileModifier {
+export class StatelessIntelligentFileModifier {
   private anthropic: Anthropic;
   private reactBasePath: string;
-  private projectFiles: Map<string, ProjectFile>;
+  private redis: RedisService;
+  private sessionId: string;
   private streamCallback?: (message: string) => void;
   
-  // Original module instances
+  // Original module instances (now stateless)
   private scopeAnalyzer: ScopeAnalyzer;
   private componentGenerationSystem: ComponentGenerationSystem;
-  private modificationSummary: ModificationSummary;
   private dependencyManager: DependencyManager;
   private fallbackMechanism: FallbackMechanism;
 
@@ -44,43 +42,208 @@ export class IntelligentFileModifier {
   private componentAdditionProcessor: ComponentAdditionProcessor;
   private tokenTracker: TokenTracker;
 
-  constructor(anthropic: Anthropic, reactBasePath: string) {
+  constructor(anthropic: Anthropic, reactBasePath: string, sessionId: string, redisUrl?: string) {
     this.anthropic = anthropic;
     this.reactBasePath = reactBasePath;
-    this.projectFiles = new Map();
+    this.sessionId = sessionId;
+    this.redis = new RedisService(redisUrl);
     
     // Initialize original modules
     this.scopeAnalyzer = new ScopeAnalyzer(anthropic);
     this.componentGenerationSystem = new ComponentGenerationSystem(anthropic, reactBasePath);
-    this.modificationSummary = new ModificationSummary();
-    this.dependencyManager = new DependencyManager(this.projectFiles);
+    this.dependencyManager = new DependencyManager(new Map()); // Will be populated from Redis
     this.fallbackMechanism = new FallbackMechanism(anthropic);
 
-    // Initialize new modular processors
+    // Initialize new modular processors with proper arguments
     this.tokenTracker = new TokenTracker();
     this.astAnalyzer = new ASTAnalyzer();
     this.projectAnalyzer = new ProjectAnalyzer(reactBasePath);
-    this.fullFileProcessor = new FullFileProcessor(anthropic, this.tokenTracker, this.astAnalyzer);
-    this.targetedNodesProcessor = new TargetedNodesProcessor(anthropic, this.tokenTracker, this.astAnalyzer);
-    this.componentAdditionProcessor = new ComponentAdditionProcessor(anthropic, reactBasePath, this.tokenTracker);
+    
+    this.fullFileProcessor = new FullFileProcessor(
+      anthropic, 
+      this.tokenTracker, 
+      this.astAnalyzer
+    );
+    
+    this.targetedNodesProcessor = new TargetedNodesProcessor(
+      anthropic, 
+      this.tokenTracker, 
+      this.astAnalyzer
+    );
+    
+    this.componentAdditionProcessor = new ComponentAdditionProcessor(
+      anthropic, 
+      reactBasePath,
+      this.tokenTracker
+    );
   }
+
+  // ==============================================================
+  // SESSION MANAGEMENT
+  // ==============================================================
+
+  async initializeSession(): Promise<void> {
+    const existingStartTime = await this.redis.getSessionStartTime(this.sessionId);
+    if (!existingStartTime) {
+      await this.redis.setSessionStartTime(this.sessionId, new Date().toISOString());
+    }
+
+    const hasCache = await this.redis.hasProjectFiles(this.sessionId);
+    if (!hasCache) {
+      this.streamUpdate('🔄 Building project tree (first time for this session)...');
+      await this.buildProjectTree();
+    } else {
+      this.streamUpdate('📁 Loading cached project files from Redis...');
+    }
+  }
+
+  async clearSession(): Promise<void> {
+    await this.redis.clearSession(this.sessionId);
+  }
+
+  // ==============================================================
+  // PROJECT FILES MANAGEMENT (Redis-backed)
+  // ==============================================================
+
+  private async getProjectFiles(): Promise<Map<string, ProjectFile>> {
+    const projectFiles = await this.redis.getProjectFiles(this.sessionId);
+    return projectFiles || new Map();
+  }
+
+  private async setProjectFiles(projectFiles: Map<string, ProjectFile>): Promise<void> {
+    await this.redis.setProjectFiles(this.sessionId, projectFiles);
+  }
+
+  private async updateProjectFile(filePath: string, projectFile: ProjectFile): Promise<void> {
+    await this.redis.updateProjectFile(this.sessionId, filePath, projectFile);
+  }
+
+  // ==============================================================
+  // MODIFICATION SUMMARY (Redis-backed)
+  // ==============================================================
+
+  private async addModificationChange(
+    type: 'modified' | 'created' | 'updated',
+    file: string,
+    description: string,
+    options?: {
+      approach?: 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION';
+      success?: boolean;
+      linesChanged?: number;
+      componentsAffected?: string[];
+      reasoning?: string;
+    }
+  ): Promise<void> {
+    const change: ModificationChange = {
+      type,
+      file,
+      description,
+      timestamp: new Date().toISOString(),
+      approach: options?.approach,
+      success: options?.success,
+      details: {
+        linesChanged: options?.linesChanged,
+        componentsAffected: options?.componentsAffected,
+        reasoning: options?.reasoning
+      }
+    };
+
+    await this.redis.addModificationChange(this.sessionId, change);
+  }
+
+  private async getModificationContextualSummary(): Promise<string> {
+    const changes = await this.redis.getModificationChanges(this.sessionId);
+    
+    if (changes.length === 0) {
+      return "";
+    }
+
+    const recentChanges = changes.slice(-5);
+    const uniqueFiles = new Set(changes.map(c => c.file));
+    const sessionStartTime = await this.redis.getSessionStartTime(this.sessionId);
+    
+    const durationMs = new Date().getTime() - new Date(sessionStartTime).getTime();
+    const minutes = Math.floor(durationMs / 60000);
+    const seconds = Math.floor((durationMs % 60000) / 1000);
+    const duration = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+
+    let summary = `
+**RECENT MODIFICATIONS IN THIS SESSION:**
+${recentChanges.map(change => {
+  const icon = this.getChangeIcon(change);
+  const status = change.success === false ? ' (failed)' : '';
+  return `• ${icon} ${change.file}${status}: ${change.description}`;
+}).join('\n')}
+
+**Session Context:**
+• Total files modified: ${uniqueFiles.size}
+• Session duration: ${duration}
+    `.trim();
+
+    return summary;
+  }
+
+  private async getMostModifiedFiles(): Promise<Array<{ file: string; count: number }>> {
+    const changes = await this.redis.getModificationChanges(this.sessionId);
+    const fileStats: Record<string, number> = {};
+    
+    changes.forEach(change => {
+      fileStats[change.file] = (fileStats[change.file] || 0) + 1;
+    });
+    
+    return Object.entries(fileStats)
+      .map(([file, count]) => ({ file, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+  }
+
+  // ==============================================================
+  // PROJECT TREE BUILDING - Compatible with your existing interface
+  // ==============================================================
+
+  async buildProjectTree(): Promise<void> {
+    this.streamUpdate('📂 Analyzing React project structure...');
+    
+    try {
+      // Try to use your existing buildProjectTree method signature
+      let projectFiles = new Map<string, ProjectFile>();
+      
+      // Update dependency manager with current Redis data
+      const currentProjectFiles = await this.getProjectFiles();
+      this.dependencyManager = new DependencyManager(currentProjectFiles);
+      
+      // Call buildProjectTree with the signature your class expects
+      const buildResult = await (this.projectAnalyzer as any).buildProjectTree(
+        projectFiles, 
+        this.dependencyManager,
+        (message: string) => this.streamUpdate(message)
+      );
+      
+      // If buildProjectTree returns the files instead of mutating the parameter
+      if (buildResult && buildResult.size > 0) {
+        projectFiles = buildResult;
+      }
+      
+      if (projectFiles.size === 0) {
+        throw new Error('No React files found in project');
+      }
+
+      // Store in Redis
+      await this.setProjectFiles(projectFiles);
+      
+      this.streamUpdate(`✅ Loaded ${projectFiles.size} React files into cache`);
+    } catch (error) {
+      console.error('Error building project tree:', error);
+      throw error;
+    }
+  }
+
+  // ==============================================================
+  // STREAM UPDATES
+  // ==============================================================
 
   setStreamCallback(callback: (message: string) => void): void {
     this.streamCallback = callback;
-    
-    // Set callback for all original modules
-    this.scopeAnalyzer.setStreamCallback(callback);
-    this.componentGenerationSystem.setStreamCallback(callback);
-    this.dependencyManager.setStreamCallback(callback);
-    this.fallbackMechanism.setStreamCallback(callback);
-
-    // Set callback for new processors
-    this.astAnalyzer.setStreamCallback(callback);
-    this.projectAnalyzer.setStreamCallback(callback);
-    this.fullFileProcessor.setStreamCallback(callback);
-    this.targetedNodesProcessor.setStreamCallback(callback);
-    this.componentAdditionProcessor.setStreamCallback(callback);
-    this.tokenTracker.setStreamCallback(callback);
   }
 
   private streamUpdate(message: string): void {
@@ -89,64 +252,182 @@ export class IntelligentFileModifier {
     }
   }
 
-  // Delegated methods using new processors
-  private async buildProjectTree(): Promise<void> {
-    return this.projectAnalyzer.buildProjectTree(this.projectFiles, this.dependencyManager, this.streamCallback);
-  }
-
-  private parseFileWithAST(filePath: string): ASTNode[] {
-    return this.astAnalyzer.parseFileWithAST(filePath, this.projectFiles);
-  }
-
-  private async analyzeFileRelevance(
-    prompt: string,
-    filePath: string,
-    astNodes: ASTNode[],
-    modificationMethod: 'FULL_FILE' | 'TARGETED_NODES'
-  ) {
-    return this.astAnalyzer.analyzeFileRelevance(
-      prompt, 
-      filePath, 
-      astNodes, 
-      modificationMethod, 
-      this.projectFiles, 
-      this.anthropic,
-      this.tokenTracker
-    );
-  }
-
-  private async handleFullFileModification(prompt: string): Promise<boolean> {
-    return this.fullFileProcessor.handleFullFileModification(
-      prompt, 
-      this.projectFiles, 
-      this.modificationSummary
-    );
-  }
-
-  private async handleTargetedModification(prompt: string): Promise<boolean> {
-    return this.targetedNodesProcessor.handleTargetedModification(
-      prompt, 
-      this.projectFiles, 
-      this.modificationSummary
-    );
-  }
+  // ==============================================================
+  // COMPONENT ADDITION HANDLER
+  // ==============================================================
 
   private async handleComponentAddition(
     prompt: string,
     scope: ModificationScope,
     projectSummaryCallback?: (summary: string, prompt: string) => Promise<string | null>
   ): Promise<ModificationResult> {
-    return this.componentAdditionProcessor.handleComponentAddition(
+    const projectFiles = await this.getProjectFiles();
+    
+    const modificationSummary = {
+      addChange: async (type: any, file: string, description: string, options?: any) => 
+        await this.addModificationChange(type, file, description, options),
+      getContextualSummary: async () => await this.getModificationContextualSummary(),
+      getMostModifiedFiles: async () => await this.getMostModifiedFiles()
+    };
+
+    return await this.componentAdditionProcessor.handleComponentAddition(
       prompt,
       scope,
-      this.projectFiles,
-      this.modificationSummary,
+      projectFiles,
+      modificationSummary as any,
       this.componentGenerationSystem,
       projectSummaryCallback
     );
   }
 
-  // Main processing method (keeping same signature)
+  // ==============================================================
+  // MODIFICATION HANDLERS - Compatible with your existing processors
+  // ==============================================================
+
+  private async handleFullFileModification(prompt: string): Promise<boolean> {
+    const projectFiles = await this.getProjectFiles();
+    
+    try {
+      // Try different method names your processor might have
+      const processor = this.fullFileProcessor as any;
+      let result;
+      
+      if (processor.processFullFileModification) {
+        result = await processor.processFullFileModification(
+          prompt,
+          projectFiles,
+          this.reactBasePath,
+          (message: string) => this.streamUpdate(message)
+        );
+      } else if (processor.process) {
+        result = await processor.process(
+          prompt,
+          projectFiles,
+          this.reactBasePath,
+          (message: string) => this.streamUpdate(message)
+        );
+      } else if (processor.handleFullFileModification) {
+        result = await processor.handleFullFileModification(
+          prompt,
+          projectFiles,
+          this.reactBasePath,
+          (message: string) => this.streamUpdate(message)
+        );
+      } else {
+        console.warn('No suitable method found on FullFileProcessor');
+        return false;
+      }
+
+      if (result) {
+        // Update project files in Redis if result contains updated files
+        if (result.updatedProjectFiles) {
+          await this.setProjectFiles(result.updatedProjectFiles);
+        } else if (result.projectFiles) {
+          await this.setProjectFiles(result.projectFiles);
+        }
+
+        // Add modification changes if available
+        if (result.changes && Array.isArray(result.changes)) {
+          for (const change of result.changes) {
+            await this.addModificationChange(
+              change.type || 'modified',
+              change.file,
+              change.description || 'File modified',
+              {
+                approach: 'FULL_FILE',
+                success: change.success !== false,
+                linesChanged: change.details?.linesChanged,
+                componentsAffected: change.details?.componentsAffected,
+                reasoning: change.details?.reasoning
+              }
+            );
+          }
+        }
+
+        return result.success !== false;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Full file modification failed:', error);
+      return false;
+    }
+  }
+
+  private async handleTargetedModification(prompt: string): Promise<boolean> {
+    const projectFiles = await this.getProjectFiles();
+    
+    try {
+      // Try different method names your processor might have
+      const processor = this.targetedNodesProcessor as any;
+      let result;
+      
+      if (processor.processTargetedModification) {
+        result = await processor.processTargetedModification(
+          prompt,
+          projectFiles,
+          this.reactBasePath,
+          (message: string) => this.streamUpdate(message)
+        );
+      } else if (processor.process) {
+        result = await processor.process(
+          prompt,
+          projectFiles,
+          this.reactBasePath,
+          (message: string) => this.streamUpdate(message)
+        );
+      } else if (processor.handleTargetedModification) {
+        result = await processor.handleTargetedModification(
+          prompt,
+          projectFiles,
+          this.reactBasePath,
+          (message: string) => this.streamUpdate(message)
+        );
+      } else {
+        console.warn('No suitable method found on TargetedNodesProcessor');
+        return false;
+      }
+
+      if (result) {
+        // Update project files in Redis if result contains updated files
+        if (result.updatedProjectFiles) {
+          await this.setProjectFiles(result.updatedProjectFiles);
+        } else if (result.projectFiles) {
+          await this.setProjectFiles(result.projectFiles);
+        }
+
+        // Add modification changes if available
+        if (result.changes && Array.isArray(result.changes)) {
+          for (const change of result.changes) {
+            await this.addModificationChange(
+              change.type || 'modified',
+              change.file,
+              change.description || 'File modified',
+              {
+                approach: 'TARGETED_NODES',
+                success: change.success !== false,
+                linesChanged: change.details?.linesChanged,
+                componentsAffected: change.details?.componentsAffected,
+                reasoning: change.details?.reasoning
+              }
+            );
+          }
+        }
+
+        return result.success !== false;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Targeted modification failed:', error);
+      return false;
+    }
+  }
+
+  // ==============================================================
+  // MAIN PROCESSING METHOD
+  // ==============================================================
+
   async processModification(
     prompt: string, 
     conversationContext?: string,
@@ -154,27 +435,23 @@ export class IntelligentFileModifier {
     projectSummaryCallback?: (summary: string, prompt: string) => Promise<string | null>
   ): Promise<ModificationResult> {
     try {
-      this.streamUpdate('🚀 Starting MODULAR intelligent modification workflow...');
+      this.streamUpdate('🚀 Starting STATELESS intelligent modification workflow...');
       
-      // Step 1: Build or load project structure
-      if (!dbSummary) {
-        await this.buildProjectTree();
-        
-        if (this.projectFiles.size === 0) {
-          return { 
-            success: false, 
-            error: 'No React files found in project',
-            selectedFiles: [],
-            addedFiles: []
-          };
-        }
-      } else {
-        this.streamUpdate('📊 Using provided database summary...');
+      await this.initializeSession();
+      
+      const projectFiles = await this.getProjectFiles();
+      
+      if (projectFiles.size === 0) {
+        return { 
+          success: false, 
+          error: 'No React files found in project',
+          selectedFiles: [],
+          addedFiles: []
+        };
       }
 
-      // Step 2: Determine modification method
-      const projectSummary = dbSummary || this.projectAnalyzer.buildProjectSummary(this.projectFiles);
-      const contextWithSummary = (conversationContext || '') + '\n\n' + this.modificationSummary.getContextualSummary();
+      const projectSummary = dbSummary || this.projectAnalyzer.buildProjectSummary(projectFiles);
+      const contextWithSummary = (conversationContext || '') + '\n\n' + await this.getModificationContextualSummary();
       
       const scope = await this.scopeAnalyzer.analyzeScope(
         prompt, 
@@ -185,7 +462,6 @@ export class IntelligentFileModifier {
       
       this.streamUpdate(`📋 Modification method: ${scope.scope}`);
 
-      // Step 3: Initialize component generation system if needed
       if (scope.scope === 'COMPONENT_ADDITION') {
         await this.componentGenerationSystem.refreshFileStructure();
         if (dbSummary) {
@@ -193,20 +469,6 @@ export class IntelligentFileModifier {
         }
       }
 
-      // Step 4: Load project files if using database summary
-      if (dbSummary && this.projectFiles.size === 0) {
-        await this.buildProjectTree();
-        if (this.projectFiles.size === 0) {
-          return { 
-            success: false, 
-            error: 'No React files found after loading',
-            selectedFiles: [],
-            addedFiles: []
-          };
-        }
-      }
-
-      // Step 5: Execute modification based on scope
       let success = false;
       let selectedFiles: string[] = [];
       let addedFiles: string[] = [];
@@ -218,12 +480,14 @@ export class IntelligentFileModifier {
           
         case 'FULL_FILE':
           success = await this.handleFullFileModification(prompt);
-          selectedFiles = this.modificationSummary.getMostModifiedFiles().map(item => item.file);
+          const fullFileModifications = await this.getMostModifiedFiles();
+          selectedFiles = fullFileModifications.map(item => item.file);
           break;
           
         case 'TARGETED_NODES':
           success = await this.handleTargetedModification(prompt);
-          selectedFiles = this.modificationSummary.getMostModifiedFiles().map(item => item.file);
+          const targetedModifications = await this.getMostModifiedFiles();
+          selectedFiles = targetedModifications.map(item => item.file);
           break;
           
         default:
@@ -235,7 +499,6 @@ export class IntelligentFileModifier {
           };
       }
       
-      // Step 6: Return results
       if (success) {
         return {
           success: true,
@@ -243,137 +506,48 @@ export class IntelligentFileModifier {
           addedFiles,
           approach: scope.scope,
           reasoning: `${scope.reasoning} Enhanced AST analysis identified ${selectedFiles.length} files for modification.`,
-          modificationSummary: this.modificationSummary.getSummary(),
-          tokenUsage: this.tokenTracker.getStats()
+          modificationSummary: await this.getModificationContextualSummary()
         };
       } else {
-        this.streamUpdate('⚠️ Primary approach failed, trying fallback...');
-        
-        const fallbackResult = await this.fallbackMechanism.executeComprehensiveFallback(
-          prompt,
-          this.projectFiles,
-          scope.scope as 'FULL_FILE' | 'TARGETED_NODES',
-          []
-        );
-        
-        if (fallbackResult.success) {
-          fallbackResult.modifiedFiles.forEach(filePath => {
-            this.modificationSummary.addChange('modified', filePath, `Fallback modification: ${prompt.substring(0, 50)}...`);
-          });
-          
-          return {
-            success: true,
-            selectedFiles: fallbackResult.modifiedFiles,
-            addedFiles: [],
-            reasoning: 'Primary analysis failed, but fallback mechanism succeeded',
-            modificationSummary: this.modificationSummary.getSummary() + '\n\n' + this.fallbackMechanism.getFallbackSummary(fallbackResult),
-            tokenUsage: this.tokenTracker.getStats()
-          };
-        }
-        
-        return { 
-          success: false, 
-          error: `${scope.scope} modifications failed - no relevant files found`,
-          selectedFiles,
+        return {
+          success: false,
+          error: 'Modification process failed',
+          selectedFiles: [],
           addedFiles: [],
-          modificationSummary: this.modificationSummary.getSummary(),
-          tokenUsage: this.tokenTracker.getStats()
+          approach: scope.scope,
+          reasoning: scope.reasoning
         };
       }
       
     } catch (error) {
-      this.streamUpdate(`💥 Unexpected error: ${error}`);
-      
+      console.error('❌ Modification process failed:', error);
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
         selectedFiles: [],
-        addedFiles: [],
-        modificationSummary: this.modificationSummary.getSummary(),
-        tokenUsage: this.tokenTracker.getStats()
+        addedFiles: []
       };
     }
   }
 
-  // Public utility methods (keeping same signatures)
-  async refreshComponentStructure(): Promise<void> {
-    this.streamUpdate('🔄 Refreshing component generation system file structure...');
-    await this.componentGenerationSystem.refreshFileStructure();
-    this.streamUpdate('✅ Component structure refreshed');
-  }
+  // ==============================================================
+  // UTILITY METHODS
+  // ==============================================================
 
-  async getComponentGenerationAnalytics(): Promise<{
-    totalComponents: number;
-    totalPages: number;
-    hasRouting: boolean;
-    availableForIntegration: number;
-  }> {
-    const summary = this.componentGenerationSystem.getFileStructureSummary();
-    
-    if (!summary) {
-      await this.componentGenerationSystem.refreshFileStructure();
-      const refreshedSummary = this.componentGenerationSystem.getFileStructureSummary();
-      
-      return {
-        totalComponents: refreshedSummary?.components.length || 0,
-        totalPages: refreshedSummary?.pages.length || 0,
-        hasRouting: refreshedSummary?.appStructure.hasRouting || false,
-        availableForIntegration: refreshedSummary?.components.filter(c => c.canAcceptChildren).length || 0
-      };
+  private getChangeIcon(change: ModificationChange): string {
+    switch (change.type) {
+      case 'created': return '📝';
+      case 'modified': return '🔄';
+      case 'updated': return '⚡';
+      default: return '🔧';
     }
-    
-    return {
-      totalComponents: summary.components.length,
-      totalPages: summary.pages.length,
-      hasRouting: summary.appStructure.hasRouting,
-      availableForIntegration: summary.components.filter(c => c.canAcceptChildren).length
-    };
   }
 
-  async getProjectAnalytics(prompt?: string): Promise<{
-    totalFiles: number;
-    analyzedFiles: number;
-    potentialTargets?: Array<{ filePath: string; elementCount: number; relevanceScore?: number }>;
-  }> {
-    return this.projectAnalyzer.getProjectAnalytics(
-      prompt, 
-      this.projectFiles, 
-      this.astAnalyzer, 
-      this.anthropic,
-      this.tokenTracker
-    );
+  async getRedisStats(): Promise<any> {
+    return await this.redis.getStats();
   }
 
-  async forceAnalyzeSpecificFiles(
-    prompt: string,
-    filePaths: string[],
-    method: 'FULL_FILE' | 'TARGETED_NODES' = 'FULL_FILE'
-  ) {
-    return this.astAnalyzer.forceAnalyzeSpecificFiles(
-      prompt,
-      filePaths,
-      method,
-      this.projectFiles,
-      this.anthropic,
-      this.tokenTracker
-    );
-  }
-
-  async getUnusedPagesInfo() {
-    return this.projectAnalyzer.getUnusedPagesInfo(this.projectFiles, this.reactBasePath);
-  }
-
-  async forceRefreshProject(): Promise<void> {
-    this.projectFiles.clear();
-    await this.buildProjectTree();
-  }
-
-  // Token tracking methods
-  getTokenUsageStats() {
-    return this.tokenTracker.getStats();
-  }
-
-  resetTokenTracking(): void {
-    this.tokenTracker.reset();
+  async cleanup(): Promise<void> {
+    await this.redis.disconnect();
   }
 }

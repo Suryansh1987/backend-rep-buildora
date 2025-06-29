@@ -33,10 +33,21 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.db = void 0;
+exports.componentIntegratorSchema = exports.mainSchema = exports.db = void 0;
+// db/index.ts - Updated database connection with both schemas
 const neon_http_1 = require("drizzle-orm/neon-http");
 const serverless_1 = require("@neondatabase/serverless");
-const schema = __importStar(require("./schema"));
+// Import your existing schema
+const schema = __importStar(require("./project_schema"));
+// Import component integrator schema
+const ciSchema = __importStar(require("./message_schema"));
+// Create connection
 const sql = (0, serverless_1.neon)(process.env.DATABASE_URL);
-exports.db = (0, neon_http_1.drizzle)(sql, { schema });
+// Create database instance with combined schemas
+exports.db = (0, neon_http_1.drizzle)(sql, {
+    schema: Object.assign(Object.assign({}, schema), ciSchema)
+});
+// Export schemas for use in other files
+exports.mainSchema = __importStar(require("./project_schema"));
+exports.componentIntegratorSchema = __importStar(require("./message_schema"));
 //# sourceMappingURL=index.js.map

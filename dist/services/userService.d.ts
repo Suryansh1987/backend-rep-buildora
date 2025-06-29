@@ -1,4 +1,4 @@
-import { type User, type NewUser } from '../db/schema';
+import { type User, type NewUser } from '../db/project_schema';
 declare class UserService {
     createOrUpdateUser(userData: NewUser): Promise<User>;
     getUserByClerkId(clerkId: string): Promise<User | null>;

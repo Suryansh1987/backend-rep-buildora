@@ -4,7 +4,7 @@
 
 import { promises as fs } from 'fs';
 import { ProjectFile, ASTNode } from '../filemodifier/types';
-import { ModificationSummary } from '../filemodifier/modification';
+import { RedisModificationSummary } from '../filemodifier/modification';
 import { ASTAnalyzer } from './Astanalyzer';
 import { TokenTracker } from '../../utils/TokenTracer';
 import { StructureValidator } from '../../utils/Structurevalidator';
@@ -41,7 +41,7 @@ export class TargetedNodesProcessor {
   async handleTargetedModification(
     prompt: string, 
     projectFiles: Map<string, ProjectFile>, 
-    modificationSummary: ModificationSummary
+    modificationSummary: RedisModificationSummary
   ): Promise<boolean> {
     this.streamUpdate(`🎯 Starting ENHANCED TARGETED_NODES modification workflow with template prompts...`);
     

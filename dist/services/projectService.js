@@ -10,14 +10,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const db_1 = require("../db");
-const schema_1 = require("../db/schema");
+const project_schema_1 = require("../db/project_schema");
 const drizzle_orm_1 = require("drizzle-orm");
 class ProjectService {
     createProject(projectData) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 const newProject = yield db_1.db
-                    .insert(schema_1.projects)
+                    .insert(project_schema_1.projects)
                     .values(Object.assign(Object.assign({}, projectData), { conversationTitle: projectData.conversationTitle || `${projectData.name} Chat` }))
                     .returning();
                 return newProject[0];
@@ -33,9 +33,9 @@ class ProjectService {
             try {
                 const userProjects = yield db_1.db
                     .select()
-                    .from(schema_1.projects)
-                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_1.projects.userId, userId), (0, drizzle_orm_1.eq)(schema_1.projects.status, "ready")))
-                    .orderBy((0, drizzle_orm_1.desc)(schema_1.projects.updatedAt));
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(project_schema_1.projects.userId, userId), (0, drizzle_orm_1.eq)(project_schema_1.projects.status, "ready")))
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt));
                 return userProjects;
             }
             catch (error) {
@@ -49,8 +49,8 @@ class ProjectService {
             try {
                 const project = yield db_1.db
                     .select()
-                    .from(schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(schema_1.projects.id, projectId))
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
                     .limit(1);
                 return project[0] || null;
             }
@@ -64,9 +64,9 @@ class ProjectService {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 const updatedProject = yield db_1.db
-                    .update(schema_1.projects)
+                    .update(project_schema_1.projects)
                     .set(Object.assign(Object.assign({}, updates), { updatedAt: new Date() }))
-                    .where((0, drizzle_orm_1.eq)(schema_1.projects.id, projectId))
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
                     .returning();
                 return updatedProject[0];
             }
@@ -80,9 +80,9 @@ class ProjectService {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 yield db_1.db
-                    .update(schema_1.projects)
+                    .update(project_schema_1.projects)
                     .set({ status: "deleted", updatedAt: new Date() })
-                    .where((0, drizzle_orm_1.eq)(schema_1.projects.id, projectId));
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
                 return true;
             }
             catch (error) {

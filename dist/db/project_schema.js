@@ -92,4 +92,4 @@ exports.userUsageRelations = (0, drizzle_orm_1.relations)(exports.userUsage, ({ 
         references: [exports.users.id],
     }),
 }));
-//# sourceMappingURL=schema.js.map
+//# sourceMappingURL=project_schema.js.map

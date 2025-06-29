@@ -1,4 +1,4 @@
-// db/Messagesummary.ts - Updated to use separate component integrator schema
+// db/Messagesummary.ts - Updated to use separate component integrator schema with ZIP URL support
 import { drizzle } from 'drizzle-orm/neon-http';
 import { neon } from '@neondatabase/serverless';
 import { eq, desc, sql, and, like } from 'drizzle-orm';
@@ -20,7 +20,7 @@ import {
 } from './message_schema';
 
 // Import the modular file modifier with proper types
-import { IntelligentFileModifier } from '../services/filemodifier';
+import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 
 // Updated interfaces to work with new modular system
 interface ModificationResult {
@@ -70,28 +70,35 @@ export class DrizzleMessageHistoryDB {
   }
 
   /**
-   * Save project summary to database
+   * Save project summary to database with optional ZIP URL and buildId
    * Returns the ID of the newly created summary
    */
-  async saveProjectSummary(summary: string, prompt: string): Promise<string | null> {
+  async saveProjectSummary(
+    summary: string, 
+    prompt: string, 
+    zipUrl?: string, 
+    buildId?: string
+  ): Promise<string | null> {
     try {
       // First, mark all existing summaries as inactive
       await this.db.update(projectSummaries)
         .set({ isActive: false })
         .where(eq(projectSummaries.isActive, true));
       
-      // Insert the new project summary
+      // Insert the new project summary with ZIP URL and buildId
       const [newSummary] = await this.db.insert(projectSummaries)
         .values({
           summary,
           originalPrompt: prompt,
+          zipUrl: zipUrl || null,
+          buildId: buildId || null,
           isActive: true,
           createdAt: new Date(),
           lastUsedAt: new Date()
         })
         .returning({ id: projectSummaries.id });
       
-      console.log(`💾 Saved new project summary with ID: ${newSummary?.id}`);
+      console.log(`💾 Saved new project summary with ZIP URL (${zipUrl}) and ID: ${newSummary?.id}`);
       
       // Return the ID of the new summary
       return newSummary?.id?.toString() || null;
@@ -102,13 +109,45 @@ export class DrizzleMessageHistoryDB {
   }
 
   /**
-   * Get the active project summary
+   * Update existing project summary with new ZIP URL and buildId
    */
-  async getActiveProjectSummary(): Promise<{ summary: string; id: string } | null> {
+  async updateProjectSummary(
+    summaryId: string, 
+    zipUrl: string, 
+    buildId: string
+  ): Promise<boolean> {
+    try {
+      await this.db.update(projectSummaries)
+        .set({ 
+          zipUrl: zipUrl,
+          buildId: buildId,
+          lastUsedAt: new Date()
+        })
+        .where(eq(projectSummaries.id, summaryId));
+      
+      console.log(`💾 Updated project summary ${summaryId} with new ZIP URL: ${zipUrl}`);
+      return true;
+    } catch (error) {
+      console.error('Error updating project summary:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get the active project summary with ZIP URL and buildId
+   */
+  async getActiveProjectSummary(): Promise<{ 
+    id: string; 
+    summary: string; 
+    zipUrl?: string; 
+    buildId?: string; 
+  } | null> {
     try {
       const result = await this.db.select({
         id: projectSummaries.id,
-        summary: projectSummaries.summary
+        summary: projectSummaries.summary,
+        zipUrl: projectSummaries.zipUrl,
+        buildId: projectSummaries.buildId
       })
       .from(projectSummaries)
       .where(eq(projectSummaries.isActive, true))
@@ -128,7 +167,9 @@ export class DrizzleMessageHistoryDB {
       
       return {
         id: result[0].id.toString(),
-        summary: result[0].summary
+        summary: result[0].summary,
+        zipUrl: result[0].zipUrl || undefined,
+        buildId: result[0].buildId || undefined
       };
     } catch (error) {
       console.error('Error getting active project summary:', error);
@@ -254,29 +295,58 @@ export class DrizzleMessageHistoryDB {
     messageType: 'user' | 'assistant',
     metadata?: {
       fileModifications?: string[];
-      modificationApproach?: 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION';
+      modificationApproach?: 
+        'FULL_FILE' 
+        | 'TARGETED_NODES' 
+        | 'COMPONENT_ADDITION' 
+        | 'FULL_FILE_GENERATION' 
+        | null;
       modificationSuccess?: boolean;
       createdFiles?: string[];
       addedFiles?: string[];
       duration?: number;
       projectSummaryId?: string;
+      promptType?: string;
+      requestType?: string;
+      relatedUserMessageId?: string;
+      success?: boolean;
+      processingTimeMs?: number;
+      tokenUsage?: any;
+      responseLength?: number;
+      buildId?: string;
+      previewUrl?: string;
+      downloadUrl?: string;
+      zipUrl?: string;
     }
   ): Promise<string> {
     const newMessage: NewMessage = {
       content,
       messageType,
       fileModifications: metadata?.fileModifications || null,
+      //@ts-ignore
       modificationApproach: metadata?.modificationApproach || null,
       modificationSuccess: metadata?.modificationSuccess || null,
-      projectSummaryId: metadata?.projectSummaryId || null, 
+      reasoning: JSON.stringify({
+        promptType: metadata?.promptType,
+        requestType: metadata?.requestType,
+        relatedUserMessageId: metadata?.relatedUserMessageId,
+        success: metadata?.success,
+        processingTimeMs: metadata?.processingTimeMs,
+        tokenUsage: metadata?.tokenUsage,
+        responseLength: metadata?.responseLength,
+        buildId: metadata?.buildId,
+        previewUrl: metadata?.previewUrl,
+        downloadUrl: metadata?.downloadUrl,
+        zipUrl: metadata?.zipUrl,
+        error: metadata?.success === false ? 'Generation failed' : undefined
+      }),
+      projectSummaryId: metadata?.projectSummaryId || null,
       createdAt: new Date()
     };
 
-    // Insert the message
     const result = await this.db.insert(messages).values(newMessage).returning({ id: messages.id });
     const messageId = result[0].id;
 
-    // Update conversation stats using SQL increment
     await this.db.update(conversationStats)
       .set({
         totalMessageCount: sql`${conversationStats.totalMessageCount} + 1`,
@@ -285,7 +355,6 @@ export class DrizzleMessageHistoryDB {
       })
       .where(eq(conversationStats.id, 1));
 
-    // Check if we need to summarize (keep only 5 recent messages)
     await this.maintainRecentMessages();
 
     return messageId;
@@ -474,13 +543,13 @@ export class DrizzleMessageHistoryDB {
     } else {
       // Create first summary
       const newSummary: NewMessageSummary = {
-  summary: newContent,
-  messageCount: newMessages.length,
-  startTime: newMessages[newMessages.length - 1].createdAt!,
-  endTime: newMessages[0].createdAt!,
-  keyTopics: ['react', 'file-modification'],
-  createdAt: new Date()
-};
+        summary: newContent,
+        messageCount: newMessages.length,
+        startTime: newMessages[newMessages.length - 1].createdAt!, // Oldest
+        endTime: newMessages[0].createdAt!, // Newest
+        keyTopics: ['react', 'file-modification'],
+        createdAt: new Date()
+      };
       await this.db.insert(messageSummaries).values(newSummary);
     }
 
@@ -711,20 +780,26 @@ ${newMessagesText}
       };
     }
   }
+
+  // Expose the db instance for external use (needed for reset-project endpoint)
+  
 }
 
 // Extended class for integration with file modifier
-export class IntelligentFileModifierWithDrizzle extends IntelligentFileModifier {
+export class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFileModifier {
   protected messageDB: DrizzleMessageHistoryDB;
 
-  constructor(
-    anthropic: Anthropic, 
-    reactBasePath: string, 
-    databaseUrl: string
-  ) {
-    super(anthropic, reactBasePath);
-    this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
-  }
+ constructor(
+  anthropic: Anthropic,
+  reactBasePath: string,
+  databaseUrl: string,
+  sessionId: string,
+  redisUrl?: string
+) {
+  super(anthropic, reactBasePath, sessionId, redisUrl); 
+  this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
+}
+
 
   // Initialize the database
   async initialize(): Promise<void> {
@@ -829,8 +904,47 @@ export class ConversationHelper {
     return await this.messageDB.getProjectSummaryForScope();
   }
 
-  // Save project summary from endpoints
-  async saveProjectSummary(summary: string, prompt: string): Promise<string | null> {
-    return await this.messageDB.saveProjectSummary(summary, prompt);
+  // Save project summary from endpoints (now supports ZIP URL and buildId)
+  async saveProjectSummary(
+    summary: string, 
+    prompt: string, 
+    zipUrl?: string, 
+    buildId?: string
+  ): Promise<string | null> {
+    return await this.messageDB.saveProjectSummary(summary, prompt, zipUrl, buildId);
+  }
+
+  // Update project summary from endpoints
+  async updateProjectSummary(
+    summaryId: string, 
+    zipUrl: string, 
+    buildId: string
+  ): Promise<boolean> {
+    return await this.messageDB.updateProjectSummary(summaryId, zipUrl, buildId);
+  }
+
+  // Get conversation with summary (keeping for backward compatibility)
+  async getConversationWithSummary(): Promise<{
+    messages: any[];
+    summaryCount: number;
+    totalMessages: number;
+  }> {
+    const conversation = await this.messageDB.getRecentConversation();
+
+    return {
+      messages: conversation.messages.map((msg: any) => ({
+        id: msg.id,
+        content: msg.content,
+        messageType: msg.messageType,
+        metadata: {
+          fileModifications: msg.fileModifications,
+          modificationApproach: msg.modificationApproach,
+          modificationSuccess: msg.modificationSuccess
+        },
+        createdAt: msg.createdAt
+      })),
+      summaryCount: conversation.summaryCount,
+      totalMessages: conversation.totalMessages
+    };
   }
 }

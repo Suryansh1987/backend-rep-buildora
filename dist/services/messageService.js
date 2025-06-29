@@ -10,24 +10,24 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const db_1 = require("../db");
-const schema_1 = require("../db/schema");
+const project_schema_1 = require("../db/project_schema");
 const drizzle_orm_1 = require("drizzle-orm");
 class MessageService {
     createMessage(messageData) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 const newMessage = yield db_1.db
-                    .insert(schema_1.messages)
+                    .insert(project_schema_1.messages)
                     .values(messageData)
                     .returning();
                 // Update project's lastMessageAt
                 yield db_1.db
-                    .update(schema_1.projects)
+                    .update(project_schema_1.projects)
                     .set({
                     lastMessageAt: new Date(),
                     updatedAt: new Date()
                 })
-                    .where((0, drizzle_orm_1.eq)(schema_1.projects.id, messageData.projectId));
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, messageData.projectId));
                 return newMessage[0];
             }
             catch (error) {
@@ -41,9 +41,9 @@ class MessageService {
             try {
                 const projectMessages = yield db_1.db
                     .select()
-                    .from(schema_1.messages)
-                    .where((0, drizzle_orm_1.eq)(schema_1.messages.projectId, projectId))
-                    .orderBy(schema_1.messages.createdAt);
+                    .from(project_schema_1.messages)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.messages.projectId, projectId))
+                    .orderBy(project_schema_1.messages.createdAt);
                 return projectMessages;
             }
             catch (error) {
@@ -56,8 +56,8 @@ class MessageService {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 yield db_1.db
-                    .delete(schema_1.messages)
-                    .where((0, drizzle_orm_1.eq)(schema_1.messages.projectId, projectId));
+                    .delete(project_schema_1.messages)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.messages.projectId, projectId));
                 return true;
             }
             catch (error) {
