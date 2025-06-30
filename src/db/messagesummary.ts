@@ -62,6 +62,7 @@ interface ModificationRecord {
 export class DrizzleMessageHistoryDB {
   private db: ReturnType<typeof drizzle>;
   private anthropic: Anthropic;
+  private defaultSessionId: string = 'default-session';
 
   constructor(databaseUrl: string, anthropic: Anthropic) {
     const sqlConnection = neon(databaseUrl);
@@ -80,14 +81,19 @@ export class DrizzleMessageHistoryDB {
     buildId?: string
   ): Promise<string | null> {
     try {
-      // First, mark all existing summaries as inactive
+      // First, mark all existing summaries as inactive for the default session
       await this.db.update(projectSummaries)
         .set({ isActive: false })
-        .where(eq(projectSummaries.isActive, true));
+        .where(and(
+          eq(projectSummaries.sessionId, this.defaultSessionId),
+          eq(projectSummaries.isActive, true)
+        ));
       
       // Insert the new project summary with ZIP URL and buildId
       const [newSummary] = await this.db.insert(projectSummaries)
         .values({
+          sessionId: this.defaultSessionId,
+          projectId: null,
           summary,
           originalPrompt: prompt,
           zipUrl: zipUrl || null,
@@ -150,7 +156,10 @@ export class DrizzleMessageHistoryDB {
         buildId: projectSummaries.buildId
       })
       .from(projectSummaries)
-      .where(eq(projectSummaries.isActive, true))
+      .where(and(
+        eq(projectSummaries.sessionId, this.defaultSessionId),
+        eq(projectSummaries.isActive, true)
+      ))
       .limit(1);
       
       if (result.length === 0) {
@@ -276,14 +285,20 @@ export class DrizzleMessageHistoryDB {
   }
 
   async initializeStats(): Promise<void> {
-    const existing = await this.db.select().from(conversationStats).where(eq(conversationStats.id, 1));
+    // Initialize for default session
+    const existing = await this.db.select()
+      .from(conversationStats)
+      .where(eq(conversationStats.sessionId, this.defaultSessionId));
     
     if (existing.length === 0) {
       await this.db.insert(conversationStats).values({
-        id: 1,
+        sessionId: this.defaultSessionId,
+        projectId: null,
         totalMessageCount: 0,
         summaryCount: 0,
         lastMessageAt: null,
+        isActive: true,
+        createdAt: new Date(),
         updatedAt: new Date()
       });
     }
@@ -317,9 +332,14 @@ export class DrizzleMessageHistoryDB {
       previewUrl?: string;
       downloadUrl?: string;
       zipUrl?: string;
+      sessionId?: string;
     }
   ): Promise<string> {
+    const sessionId = metadata?.sessionId || this.defaultSessionId;
+    
     const newMessage: NewMessage = {
+      sessionId,
+      projectId: null,
       content,
       messageType,
       fileModifications: metadata?.fileModifications || null,
@@ -351,11 +371,12 @@ export class DrizzleMessageHistoryDB {
       .set({
         totalMessageCount: sql`${conversationStats.totalMessageCount} + 1`,
         lastMessageAt: new Date(),
+        lastActivity: new Date(),
         updatedAt: new Date()
       })
-      .where(eq(conversationStats.id, 1));
+      .where(eq(conversationStats.sessionId, sessionId));
 
-    await this.maintainRecentMessages();
+    await this.maintainRecentMessages(sessionId);
 
     return messageId;
   }
@@ -442,6 +463,7 @@ export class DrizzleMessageHistoryDB {
         .select()
         .from(messages)
         .where(and(
+          eq(messages.sessionId, this.defaultSessionId),
           eq(messages.messageType, 'assistant'),
           like(messages.content, 'MODIFICATION COMPLETED:%')
         ))
@@ -468,8 +490,11 @@ export class DrizzleMessageHistoryDB {
   }
 
   // Maintain only 5 recent messages, summarize older ones
-  private async maintainRecentMessages(): Promise<void> {
-    const allMessages = await this.db.select().from(messages).orderBy(desc(messages.createdAt));
+  private async maintainRecentMessages(sessionId: string = this.defaultSessionId): Promise<void> {
+    const allMessages = await this.db.select()
+      .from(messages)
+      .where(eq(messages.sessionId, sessionId))
+      .orderBy(desc(messages.createdAt));
 
     if (allMessages.length > 5) {
       const recentMessages = allMessages.slice(0, 5);
@@ -477,7 +502,7 @@ export class DrizzleMessageHistoryDB {
 
       if (oldMessages.length > 0) {
         // Update the single growing summary instead of creating new ones
-        await this.updateGrowingSummary(oldMessages);
+        await this.updateGrowingSummary(oldMessages, sessionId);
       }
 
       // Delete old messages (keep only recent 5)
@@ -490,12 +515,16 @@ export class DrizzleMessageHistoryDB {
 
   async fixConversationStats(): Promise<void> {
     try {
-      // Count actual messages
-      const allMessages = await this.db.select().from(messages);
+      // Count actual messages for default session
+      const allMessages = await this.db.select()
+        .from(messages)
+        .where(eq(messages.sessionId, this.defaultSessionId));
       const messageCount = allMessages.length;
       
-      // Count summaries
-      const summaries = await this.db.select().from(messageSummaries);
+      // Count summaries for default session
+      const summaries = await this.db.select()
+        .from(messageSummaries)
+        .where(eq(messageSummaries.sessionId, this.defaultSessionId));
       const summaryCount = summaries.length;
       
       // Get summary message count
@@ -513,7 +542,7 @@ export class DrizzleMessageHistoryDB {
           lastMessageAt: allMessages.length > 0 ? allMessages[allMessages.length - 1].createdAt : null,
           updatedAt: new Date()
         })
-        .where(eq(conversationStats.id, 1));
+        .where(eq(conversationStats.sessionId, this.defaultSessionId));
         
       console.log(`✅ Fixed stats: ${totalMessages} total messages, ${summaryCount} summaries`);
     } catch (error) {
@@ -521,9 +550,13 @@ export class DrizzleMessageHistoryDB {
     }
   }
 
-  private async updateGrowingSummary(newMessages: Message[]): Promise<void> {
+  private async updateGrowingSummary(newMessages: Message[], sessionId: string = this.defaultSessionId): Promise<void> {
     // Get the existing summary
-    const existingSummaries = await this.db.select().from(messageSummaries).orderBy(desc(messageSummaries.createdAt)).limit(1);
+    const existingSummaries = await this.db.select()
+      .from(messageSummaries)
+      .where(eq(messageSummaries.sessionId, sessionId))
+      .orderBy(desc(messageSummaries.createdAt))
+      .limit(1);
     const existingSummary = existingSummaries[0];
 
     // Generate new content to add to summary
@@ -536,13 +569,14 @@ export class DrizzleMessageHistoryDB {
           summary: newContent,
           messageCount: existingSummary.messageCount + newMessages.length,
           endTime: newMessages[0].createdAt!, // Most recent time
-          //@ts-ignore
           updatedAt: new Date()
         })
         .where(eq(messageSummaries.id, existingSummary.id));
     } else {
       // Create first summary
       const newSummary: NewMessageSummary = {
+        sessionId,
+        projectId: null,
         summary: newContent,
         messageCount: newMessages.length,
         startTime: newMessages[newMessages.length - 1].createdAt!, // Oldest
@@ -560,7 +594,7 @@ export class DrizzleMessageHistoryDB {
           summaryCount: 1,
           updatedAt: new Date()
         })
-        .where(eq(conversationStats.id, 1));
+        .where(eq(conversationStats.sessionId, sessionId));
     }
   }
 
@@ -604,7 +638,7 @@ ${newMessagesText}
       const response = await this.anthropic.messages.create({
         model: 'claude-3-5-sonnet-20240620',
         max_tokens: 800,
-        temperature: 0,
+        temperature: 0.2,
         messages: [{ role: 'user', content: claudePrompt }],
       });
 
@@ -626,11 +660,18 @@ ${newMessagesText}
 
   // Get conversation context for file modification prompts
   async getConversationContext(): Promise<string> {
-    // Get the single summary
-    const summaries = await this.db.select().from(messageSummaries).orderBy(desc(messageSummaries.createdAt)).limit(1);
+    // Get the single summary for default session
+    const summaries = await this.db.select()
+      .from(messageSummaries)
+      .where(eq(messageSummaries.sessionId, this.defaultSessionId))
+      .orderBy(desc(messageSummaries.createdAt))
+      .limit(1);
     
-    // Get recent messages
-    const recentMessages = await this.db.select().from(messages).orderBy(desc(messages.createdAt));
+    // Get recent messages for default session
+    const recentMessages = await this.db.select()
+      .from(messages)
+      .where(eq(messages.sessionId, this.defaultSessionId))
+      .orderBy(desc(messages.createdAt));
 
     let context = '';
 
@@ -667,11 +708,16 @@ ${newMessagesText}
     summaryCount: number;
     totalMessages: number;
   }> {
-    // Get recent messages
-    const recentMessages = await this.db.select().from(messages).orderBy(desc(messages.createdAt));
+    // Get recent messages for default session
+    const recentMessages = await this.db.select()
+      .from(messages)
+      .where(eq(messages.sessionId, this.defaultSessionId))
+      .orderBy(desc(messages.createdAt));
 
-    // Get stats
-    const stats = await this.db.select().from(conversationStats).where(eq(conversationStats.id, 1));
+    // Get stats for default session
+    const stats = await this.db.select()
+      .from(conversationStats)
+      .where(eq(conversationStats.sessionId, this.defaultSessionId));
     const currentStats = stats[0] || { totalMessageCount: 0, summaryCount: 0 };
 
     return {
@@ -683,7 +729,11 @@ ${newMessagesText}
 
   // Get current summary for display
   async getCurrentSummary(): Promise<{summary: string; messageCount: number} | null> {
-    const summaries = await this.db.select().from(messageSummaries).orderBy(desc(messageSummaries.createdAt)).limit(1);
+    const summaries = await this.db.select()
+      .from(messageSummaries)
+      .where(eq(messageSummaries.sessionId, this.defaultSessionId))
+      .orderBy(desc(messageSummaries.createdAt))
+      .limit(1);
     
     if (summaries.length > 0) {
       const summary = summaries[0];
@@ -698,13 +748,17 @@ ${newMessagesText}
 
   // Get conversation stats
   async getConversationStats(): Promise<ConversationStats | null> {
-    const stats = await this.db.select().from(conversationStats).where(eq(conversationStats.id, 1));
+    const stats = await this.db.select()
+      .from(conversationStats)
+      .where(eq(conversationStats.sessionId, this.defaultSessionId));
     return stats[0] || null;
   }
 
   // Get all summaries
   async getAllSummaries(): Promise<MessageSummary[]> {
-    return await this.db.select().from(messageSummaries).orderBy(desc(messageSummaries.createdAt));
+    return await this.db.select()
+      .from(messageSummaries)
+      .orderBy(desc(messageSummaries.createdAt));
   }
 
   // Clear all conversation data (for testing/reset)
@@ -719,7 +773,7 @@ ${newMessagesText}
         lastMessageAt: null,
         updatedAt: new Date()
       })
-      .where(eq(conversationStats.id, 1));
+      .where(eq(conversationStats.sessionId, this.defaultSessionId));
   }
 
   // Get modification statistics
@@ -735,6 +789,7 @@ ${newMessagesText}
         .select()
         .from(messages)
         .where(and(
+          eq(messages.sessionId, this.defaultSessionId),
           eq(messages.messageType, 'assistant'),
           like(messages.content, 'MODIFICATION COMPLETED:%')
         ));
@@ -781,25 +836,73 @@ ${newMessagesText}
     }
   }
 
-  // Expose the db instance for external use (needed for reset-project endpoint)
+  // NEW SESSION-BASED METHODS (for future use)
   
-}
+  /**
+   * Initialize stats for a specific session (new method)
+   */
+  async initializeSessionStats(sessionId: string, projectId?: number): Promise<void> {
+    const existing = await this.db.select()
+      .from(conversationStats)
+      .where(eq(conversationStats.sessionId, sessionId));
+    
+    if (existing.length === 0) {
+      await this.db.insert(conversationStats).values({
+        sessionId,
+        projectId: projectId || null,
+        totalMessageCount: 0,
+        summaryCount: 0,
+        lastMessageAt: null,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    }
+  }
 
+  /**
+   * Get project sessions (new method)
+   */
+  async getProjectSessions(projectId: number): Promise<any[]> {
+    try {
+      const sessions = await this.db.select()
+        .from(conversationStats)
+        .where(and(
+          eq(conversationStats.projectId, projectId),
+          eq(conversationStats.isActive, true)
+        ))
+        .orderBy(desc(conversationStats.lastActivity));
+
+     return sessions.map(session => ({
+  sessionId: session.sessionId,
+  projectId: session.projectId,
+  hasActiveConversation: (session.totalMessageCount ?? 0) > 0,
+  messageCount: session.totalMessageCount ?? 0,
+  lastActivity: session.lastActivity || session.createdAt,
+  summaryExists: (session.summaryCount ?? 0) > 0
+}));
+
+    } catch (error) {
+      console.error('Error getting project sessions:', error);
+      return [];
+    }
+  }
+}
 
 // Extended class for integration with file modifier
 export class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFileModifier {
   protected messageDB: DrizzleMessageHistoryDB;
 
- constructor(
-  anthropic: Anthropic,
-  reactBasePath: string,
-  databaseUrl: string,
-  sessionId: string,
-  redisUrl?: string  
-) {
-  super(anthropic, reactBasePath, sessionId, redisUrl); 
-  this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
-}
+  constructor(
+    anthropic: Anthropic,
+    reactBasePath: string,
+    databaseUrl: string,
+    sessionId: string,
+    redisUrl?: string  
+  ) {
+    super(anthropic, reactBasePath, sessionId, redisUrl); 
+    this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
+  }
 
   // Initialize the database
   async initialize(): Promise<void> {

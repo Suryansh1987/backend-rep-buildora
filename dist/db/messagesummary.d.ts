@@ -37,6 +37,7 @@ interface ModificationRecord {
 export declare class DrizzleMessageHistoryDB {
     private db;
     private anthropic;
+    private defaultSessionId;
     constructor(databaseUrl: string, anthropic: Anthropic);
     /**
      * Save project summary to database with optional ZIP URL and buildId
@@ -92,6 +93,7 @@ export declare class DrizzleMessageHistoryDB {
         previewUrl?: string;
         downloadUrl?: string;
         zipUrl?: string;
+        sessionId?: string;
     }): Promise<string>;
     /**
      * Save modification details for future context
@@ -133,6 +135,14 @@ export declare class DrizzleMessageHistoryDB {
         }>;
         approachUsage: Record<string, number>;
     }>;
+    /**
+     * Initialize stats for a specific session (new method)
+     */
+    initializeSessionStats(sessionId: string, projectId?: number): Promise<void>;
+    /**
+     * Get project sessions (new method)
+     */
+    getProjectSessions(projectId: number): Promise<any[]>;
 }
 export declare class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFileModifier {
     protected messageDB: DrizzleMessageHistoryDB;

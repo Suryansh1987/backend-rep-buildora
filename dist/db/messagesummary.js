@@ -20,6 +20,7 @@ const message_schema_1 = require("./message_schema");
 const filemodifier_1 = require("../services/filemodifier");
 class DrizzleMessageHistoryDB {
     constructor(databaseUrl, anthropic) {
+        this.defaultSessionId = 'default-session';
         const sqlConnection = (0, serverless_1.neon)(databaseUrl);
         this.db = (0, neon_http_1.drizzle)(sqlConnection);
         this.anthropic = anthropic;
@@ -32,13 +33,15 @@ class DrizzleMessageHistoryDB {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
             try {
-                // First, mark all existing summaries as inactive
+                // First, mark all existing summaries as inactive for the default session
                 yield this.db.update(message_schema_1.projectSummaries)
                     .set({ isActive: false })
-                    .where((0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.isActive, true));
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.sessionId, this.defaultSessionId), (0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.isActive, true)));
                 // Insert the new project summary with ZIP URL and buildId
                 const [newSummary] = yield this.db.insert(message_schema_1.projectSummaries)
                     .values({
+                    sessionId: this.defaultSessionId,
+                    projectId: null,
                     summary,
                     originalPrompt: prompt,
                     zipUrl: zipUrl || null,
@@ -93,7 +96,7 @@ class DrizzleMessageHistoryDB {
                     buildId: message_schema_1.projectSummaries.buildId
                 })
                     .from(message_schema_1.projectSummaries)
-                    .where((0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.isActive, true))
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.sessionId, this.defaultSessionId), (0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.isActive, true)))
                     .limit(1);
                 if (result.length === 0) {
                     console.log('No active project summary found');
@@ -218,13 +221,19 @@ class DrizzleMessageHistoryDB {
     }
     initializeStats() {
         return __awaiter(this, void 0, void 0, function* () {
-            const existing = yield this.db.select().from(message_schema_1.conversationStats).where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
+            // Initialize for default session
+            const existing = yield this.db.select()
+                .from(message_schema_1.conversationStats)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, this.defaultSessionId));
             if (existing.length === 0) {
                 yield this.db.insert(message_schema_1.conversationStats).values({
-                    id: 1,
+                    sessionId: this.defaultSessionId,
+                    projectId: null,
                     totalMessageCount: 0,
                     summaryCount: 0,
                     lastMessageAt: null,
+                    isActive: true,
+                    createdAt: new Date(),
                     updatedAt: new Date()
                 });
             }
@@ -233,7 +242,10 @@ class DrizzleMessageHistoryDB {
     // Add a new message
     addMessage(content, messageType, metadata) {
         return __awaiter(this, void 0, void 0, function* () {
+            const sessionId = (metadata === null || metadata === void 0 ? void 0 : metadata.sessionId) || this.defaultSessionId;
             const newMessage = {
+                sessionId,
+                projectId: null,
                 content,
                 messageType,
                 fileModifications: (metadata === null || metadata === void 0 ? void 0 : metadata.fileModifications) || null,
@@ -263,10 +275,11 @@ class DrizzleMessageHistoryDB {
                 .set({
                 totalMessageCount: (0, drizzle_orm_1.sql) `${message_schema_1.conversationStats.totalMessageCount} + 1`,
                 lastMessageAt: new Date(),
+                lastActivity: new Date(),
                 updatedAt: new Date()
             })
-                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
-            yield this.maintainRecentMessages();
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, sessionId));
+            yield this.maintainRecentMessages(sessionId);
             return messageId;
         });
     }
@@ -340,7 +353,7 @@ class DrizzleMessageHistoryDB {
                 const recentModifications = yield this.db
                     .select()
                     .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.messageType, 'assistant'), (0, drizzle_orm_1.like)(message_schema_1.ciMessages.content, 'MODIFICATION COMPLETED:%')))
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, this.defaultSessionId), (0, drizzle_orm_1.eq)(message_schema_1.ciMessages.messageType, 'assistant'), (0, drizzle_orm_1.like)(message_schema_1.ciMessages.content, 'MODIFICATION COMPLETED:%')))
                     .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt))
                     .limit(limit);
                 return recentModifications.map(msg => ({
@@ -364,14 +377,17 @@ class DrizzleMessageHistoryDB {
     }
     // Maintain only 5 recent messages, summarize older ones
     maintainRecentMessages() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const allMessages = yield this.db.select().from(message_schema_1.ciMessages).orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
+        return __awaiter(this, arguments, void 0, function* (sessionId = this.defaultSessionId) {
+            const allMessages = yield this.db.select()
+                .from(message_schema_1.ciMessages)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, sessionId))
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
             if (allMessages.length > 5) {
                 const recentMessages = allMessages.slice(0, 5);
                 const oldMessages = allMessages.slice(5);
                 if (oldMessages.length > 0) {
                     // Update the single growing summary instead of creating new ones
-                    yield this.updateGrowingSummary(oldMessages);
+                    yield this.updateGrowingSummary(oldMessages, sessionId);
                 }
                 // Delete old messages (keep only recent 5)
                 const oldMessageIds = oldMessages.map(m => m.id);
@@ -384,11 +400,15 @@ class DrizzleMessageHistoryDB {
     fixConversationStats() {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // Count actual messages
-                const allMessages = yield this.db.select().from(message_schema_1.ciMessages);
+                // Count actual messages for default session
+                const allMessages = yield this.db.select()
+                    .from(message_schema_1.ciMessages)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, this.defaultSessionId));
                 const messageCount = allMessages.length;
-                // Count summaries
-                const summaries = yield this.db.select().from(message_schema_1.messageSummaries);
+                // Count summaries for default session
+                const summaries = yield this.db.select()
+                    .from(message_schema_1.messageSummaries)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.messageSummaries.sessionId, this.defaultSessionId));
                 const summaryCount = summaries.length;
                 // Get summary message count
                 const latestSummary = summaries[0];
@@ -403,7 +423,7 @@ class DrizzleMessageHistoryDB {
                     lastMessageAt: allMessages.length > 0 ? allMessages[allMessages.length - 1].createdAt : null,
                     updatedAt: new Date()
                 })
-                    .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, this.defaultSessionId));
                 console.log(`✅ Fixed stats: ${totalMessages} total messages, ${summaryCount} summaries`);
             }
             catch (error) {
@@ -411,10 +431,14 @@ class DrizzleMessageHistoryDB {
             }
         });
     }
-    updateGrowingSummary(newMessages) {
-        return __awaiter(this, void 0, void 0, function* () {
+    updateGrowingSummary(newMessages_1) {
+        return __awaiter(this, arguments, void 0, function* (newMessages, sessionId = this.defaultSessionId) {
             // Get the existing summary
-            const existingSummaries = yield this.db.select().from(message_schema_1.messageSummaries).orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt)).limit(1);
+            const existingSummaries = yield this.db.select()
+                .from(message_schema_1.messageSummaries)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.messageSummaries.sessionId, sessionId))
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt))
+                .limit(1);
             const existingSummary = existingSummaries[0];
             // Generate new content to add to summary
             const { summary: newContent } = yield this.generateSummaryUpdate(newMessages, existingSummary === null || existingSummary === void 0 ? void 0 : existingSummary.summary);
@@ -425,7 +449,6 @@ class DrizzleMessageHistoryDB {
                     summary: newContent,
                     messageCount: existingSummary.messageCount + newMessages.length,
                     endTime: newMessages[0].createdAt, // Most recent time
-                    //@ts-ignore
                     updatedAt: new Date()
                 })
                     .where((0, drizzle_orm_1.eq)(message_schema_1.messageSummaries.id, existingSummary.id));
@@ -433,6 +456,8 @@ class DrizzleMessageHistoryDB {
             else {
                 // Create first summary
                 const newSummary = {
+                    sessionId,
+                    projectId: null,
                     summary: newContent,
                     messageCount: newMessages.length,
                     startTime: newMessages[newMessages.length - 1].createdAt, // Oldest
@@ -449,7 +474,7 @@ class DrizzleMessageHistoryDB {
                     summaryCount: 1,
                     updatedAt: new Date()
                 })
-                    .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, sessionId));
             }
         });
     }
@@ -492,7 +517,7 @@ ${newMessagesText}
                 const response = yield this.anthropic.messages.create({
                     model: 'claude-3-5-sonnet-20240620',
                     max_tokens: 800,
-                    temperature: 0,
+                    temperature: 0.2,
                     messages: [{ role: 'user', content: claudePrompt }],
                 });
                 const firstBlock = response.content[0];
@@ -513,10 +538,17 @@ ${newMessagesText}
     // Get conversation context for file modification prompts
     getConversationContext() {
         return __awaiter(this, void 0, void 0, function* () {
-            // Get the single summary
-            const summaries = yield this.db.select().from(message_schema_1.messageSummaries).orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt)).limit(1);
-            // Get recent messages
-            const recentMessages = yield this.db.select().from(message_schema_1.ciMessages).orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
+            // Get the single summary for default session
+            const summaries = yield this.db.select()
+                .from(message_schema_1.messageSummaries)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.messageSummaries.sessionId, this.defaultSessionId))
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt))
+                .limit(1);
+            // Get recent messages for default session
+            const recentMessages = yield this.db.select()
+                .from(message_schema_1.ciMessages)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, this.defaultSessionId))
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
             let context = '';
             // Add the single growing summary
             if (summaries.length > 0) {
@@ -546,10 +578,15 @@ ${newMessagesText}
     // Get recent conversation for display
     getRecentConversation() {
         return __awaiter(this, void 0, void 0, function* () {
-            // Get recent messages
-            const recentMessages = yield this.db.select().from(message_schema_1.ciMessages).orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
-            // Get stats
-            const stats = yield this.db.select().from(message_schema_1.conversationStats).where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
+            // Get recent messages for default session
+            const recentMessages = yield this.db.select()
+                .from(message_schema_1.ciMessages)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, this.defaultSessionId))
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
+            // Get stats for default session
+            const stats = yield this.db.select()
+                .from(message_schema_1.conversationStats)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, this.defaultSessionId));
             const currentStats = stats[0] || { totalMessageCount: 0, summaryCount: 0 };
             return {
                 messages: recentMessages,
@@ -561,7 +598,11 @@ ${newMessagesText}
     // Get current summary for display
     getCurrentSummary() {
         return __awaiter(this, void 0, void 0, function* () {
-            const summaries = yield this.db.select().from(message_schema_1.messageSummaries).orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt)).limit(1);
+            const summaries = yield this.db.select()
+                .from(message_schema_1.messageSummaries)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.messageSummaries.sessionId, this.defaultSessionId))
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt))
+                .limit(1);
             if (summaries.length > 0) {
                 const summary = summaries[0];
                 return {
@@ -575,14 +616,18 @@ ${newMessagesText}
     // Get conversation stats
     getConversationStats() {
         return __awaiter(this, void 0, void 0, function* () {
-            const stats = yield this.db.select().from(message_schema_1.conversationStats).where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
+            const stats = yield this.db.select()
+                .from(message_schema_1.conversationStats)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, this.defaultSessionId));
             return stats[0] || null;
         });
     }
     // Get all summaries
     getAllSummaries() {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.db.select().from(message_schema_1.messageSummaries).orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt));
+            return yield this.db.select()
+                .from(message_schema_1.messageSummaries)
+                .orderBy((0, drizzle_orm_1.desc)(message_schema_1.messageSummaries.createdAt));
         });
     }
     // Clear all conversation data (for testing/reset)
@@ -598,7 +643,7 @@ ${newMessagesText}
                 lastMessageAt: null,
                 updatedAt: new Date()
             })
-                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.id, 1));
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, this.defaultSessionId));
         });
     }
     // Get modification statistics
@@ -608,7 +653,7 @@ ${newMessagesText}
                 const modificationMessages = yield this.db
                     .select()
                     .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.messageType, 'assistant'), (0, drizzle_orm_1.like)(message_schema_1.ciMessages.content, 'MODIFICATION COMPLETED:%')));
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, this.defaultSessionId), (0, drizzle_orm_1.eq)(message_schema_1.ciMessages.messageType, 'assistant'), (0, drizzle_orm_1.like)(message_schema_1.ciMessages.content, 'MODIFICATION COMPLETED:%')));
                 const stats = {
                     totalModifications: modificationMessages.length,
                     successfulModifications: modificationMessages.filter(m => m.modificationSuccess === true).length,
@@ -645,6 +690,57 @@ ${newMessagesText}
                     mostModifiedFiles: [],
                     approachUsage: {}
                 };
+            }
+        });
+    }
+    // NEW SESSION-BASED METHODS (for future use)
+    /**
+     * Initialize stats for a specific session (new method)
+     */
+    initializeSessionStats(sessionId, projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const existing = yield this.db.select()
+                .from(message_schema_1.conversationStats)
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, sessionId));
+            if (existing.length === 0) {
+                yield this.db.insert(message_schema_1.conversationStats).values({
+                    sessionId,
+                    projectId: projectId || null,
+                    totalMessageCount: 0,
+                    summaryCount: 0,
+                    lastMessageAt: null,
+                    isActive: true,
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                });
+            }
+        });
+    }
+    /**
+     * Get project sessions (new method)
+     */
+    getProjectSessions(projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const sessions = yield this.db.select()
+                    .from(message_schema_1.conversationStats)
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.projectId, projectId), (0, drizzle_orm_1.eq)(message_schema_1.conversationStats.isActive, true)))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.conversationStats.lastActivity));
+                return sessions.map(session => {
+                    var _a, _b, _c;
+                    return ({
+                        sessionId: session.sessionId,
+                        projectId: session.projectId,
+                        hasActiveConversation: ((_a = session.totalMessageCount) !== null && _a !== void 0 ? _a : 0) > 0,
+                        messageCount: (_b = session.totalMessageCount) !== null && _b !== void 0 ? _b : 0,
+                        lastActivity: session.lastActivity || session.createdAt,
+                        summaryExists: ((_c = session.summaryCount) !== null && _c !== void 0 ? _c : 0) > 0
+                    });
+                });
+            }
+            catch (error) {
+                console.error('Error getting project sessions:', error);
+                return [];
             }
         });
     }

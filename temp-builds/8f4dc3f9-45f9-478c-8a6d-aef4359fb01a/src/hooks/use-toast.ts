@@ -79,9 +79,9 @@ const DashboardPage: React.FC = () => {
 
   return (
     <Box sx={{ padding: '32px', backgroundColor: '#FFFFFF', minHeight: '100vh' }}>
-<DarkModeSwitch>
+      <DarkModeSwitch>
         <IconButton sx={{ mr: 1 }} onClick={toggleDarkMode} color="inherit">
-          {darkMode ? <Brightness7Icon sx={{ color: '#0000FF' }} /> : <Brightness4Icon sx={{ color: '#0000FF' }} />}
+          {darkMode ? <Brightness7Icon sx={{ color: '#FFD700' }} /> : <Brightness4Icon sx={{ color: '#FFD700' }} />}
         </IconButton>
         <Switch
           checked={darkMode}
@@ -89,10 +89,10 @@ const DashboardPage: React.FC = () => {
           color="primary"
           sx={{
             '& .MuiSwitch-switchBase.Mui-checked': {
-              color: '#0000FF',
+              color: '#FFD700',
             },
             '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
-              backgroundColor: '#0000FF',
+              backgroundColor: '#FFD700',
             },
           }}
         />

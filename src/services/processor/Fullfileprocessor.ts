@@ -1,6 +1,3 @@
-// ============================================================================
-// ENHANCED DYNAMIC BATCH FULL FILE PROCESSOR: processors/FullFileProcessor.ts
-// ============================================================================
 
 import { promises as fs } from 'fs';
 import { join, resolve, isAbsolute, relative, dirname, basename } from 'path';
