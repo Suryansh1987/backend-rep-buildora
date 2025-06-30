@@ -1,4 +1,4 @@
-// routes/generation.ts - Project generation routes
+// routes/generation.ts - Project generation routes with updated Azure deployment
 import express, { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import AdmZip from "adm-zip";
@@ -9,10 +9,12 @@ import {
   uploadToAzureBlob,
   triggerAzureContainerJob,
   deployToSWA,
+  runBuildAndDeploy,
 } from "../services/azure-deploy";
 import { DrizzleMessageHistoryDB } from '../db/messagesummary';
 import { StatelessSessionManager } from './session';
 import { systemPrompt } from "../defaults/promt";
+import { parseFrontendCode } from "../utils/newparser";
 import Anthropic from "@anthropic-ai/sdk";
 
 const router = express.Router();
@@ -72,7 +74,7 @@ export function initializeGenerationRoutes(
   sessionManager: StatelessSessionManager
 ): express.Router {
 
-  // MAIN GENERATION ENDPOINT (enhanced with Redis session support)
+  // MAIN GENERATION ENDPOINT (enhanced with Redis session support and new Azure deployment)
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     const { prompt, projectId } = req.body;
     if (!prompt) {
@@ -164,90 +166,68 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
 
       console.log('🔍 Frontend generation completed. Total response length:', accumulatedResponse.length);
 
-      // Parse files (same logic as your working code)
+      // Parse files using the new parser
       let parsedFiles: FileData[] = [];
       let parseSuccess = false;
       let parseError = null;
 
       try {
-        console.log('🔍 Attempting to parse frontend response...');
-        
-        let jsonContent = accumulatedResponse.trim();
-        
-        const jsonBlockMatch = jsonContent.match(/```json\s*([\s\S]*?)\s*```/);
-        if (jsonBlockMatch) {
-          jsonContent = jsonBlockMatch[1].trim();
-          console.log('🔍 Extracted JSON from markdown code block');
-        } else {
-          const jsonObjectMatch = jsonContent.match(/\{[\s\S]*\}/);
-          if (jsonObjectMatch) {
-            jsonContent = jsonObjectMatch[0];
-            console.log('🔍 Extracted JSON object from response');
-          }
-        }
-        
-        if (!jsonContent.endsWith('}')) {
-          console.log('⚠️ JSON appears truncated, attempting to fix...');
-          const lastCompleteQuote = jsonContent.lastIndexOf('",');
-          if (lastCompleteQuote !== -1) {
-            jsonContent = jsonContent.substring(0, lastCompleteQuote + 1) + '\n  }\n}';
-            console.log('🔧 Attempted to close truncated JSON');
-          }
-        }
-        
-        const parsed = JSON.parse(jsonContent);
-        
-        if (parsed.codeFiles && typeof parsed.codeFiles === 'object') {
-          parsedFiles = Object.entries(parsed.codeFiles).map(([path, content]) => ({
-            path,
-            content: content as string
-          }));
-          parseSuccess = true;
-          console.log(`✅ Successfully parsed ${parsedFiles.length} files from codeFiles object`);
-        }
-        else if (parsed.files && Array.isArray(parsed.files)) {
-          parsedFiles = parsed.files;
-          parseSuccess = true;
-          console.log(`✅ Successfully parsed ${parsedFiles.length} files from files array`);
-        }
-        else {
-          throw new Error(`JSON structure not recognized. Keys found: ${Object.keys(parsed).join(', ')}`);
-        }
-        
+        console.log('🔍 Attempting to parse frontend response with new parser...');
+        const parsedFrontend = parseFrontendCode(accumulatedResponse);
+        parsedFiles = parsedFrontend.codeFiles;
+        parseSuccess = true;
+        console.log(`✅ Successfully parsed ${parsedFiles.length} files using new parser`);
       } catch (error) {
         parseError = error;
         console.error('❌ Failed to parse files from response:', parseError);
         
+        // Fallback to old parsing logic if needed
         try {
-          console.log('🔧 Attempting enhanced regex fallback...');
-          const extractedFiles: FileData[] = [];
+          console.log('🔧 Attempting fallback parsing...');
+          let jsonContent = accumulatedResponse.trim();
           
-          const filePatterns = [
-            /"([^"]+\.(?:tsx?|jsx?|js|ts))"\s*:\s*"((?:[^"\\]|\\.)*)"/g,
-            /(?:path|file):\s*"([^"]+\.(?:tsx?|jsx?|js|ts))"\s*,?\s*content:\s*"((?:[^"\\]|\\.)*)"/g
-          ];
-          
-          for (const pattern of filePatterns) {
-            let match;
-            while ((match = pattern.exec(accumulatedResponse)) !== null) {
-              const path = match[1];
-              let content = match[2];
-              
-              content = content.replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
-              
-              if (path && content && !extractedFiles.find(f => f.path === path)) {
-                extractedFiles.push({ path, content });
-              }
+          const jsonBlockMatch = jsonContent.match(/```json\s*([\s\S]*?)\s*```/);
+          if (jsonBlockMatch) {
+            jsonContent = jsonBlockMatch[1].trim();
+            console.log('🔍 Extracted JSON from markdown code block');
+          } else {
+            const jsonObjectMatch = jsonContent.match(/\{[\s\S]*\}/);
+            if (jsonObjectMatch) {
+              jsonContent = jsonObjectMatch[0];
+              console.log('🔍 Extracted JSON object from response');
             }
           }
           
-          if (extractedFiles.length > 0) {
-            parsedFiles = extractedFiles;
-            parseSuccess = true;
-            console.log(`✅ Successfully extracted ${parsedFiles.length} files using enhanced regex fallback`);
+          if (!jsonContent.endsWith('}')) {
+            console.log('⚠️ JSON appears truncated, attempting to fix...');
+            const lastCompleteQuote = jsonContent.lastIndexOf('",');
+            if (lastCompleteQuote !== -1) {
+              jsonContent = jsonContent.substring(0, lastCompleteQuote + 1) + '\n  }\n}';
+              console.log('🔧 Attempted to close truncated JSON');
+            }
           }
-        } catch (regexError) {
-          console.error('❌ Enhanced regex fallback also failed:', regexError);
+          
+          const parsed = JSON.parse(jsonContent);
+          
+          if (parsed.codeFiles && typeof parsed.codeFiles === 'object') {
+            parsedFiles = Object.entries(parsed.codeFiles).map(([path, content]) => ({
+              path,
+              content: content as string
+            }));
+            parseSuccess = true;
+            console.log(`✅ Successfully parsed ${parsedFiles.length} files from codeFiles object`);
+          }
+          else if (parsed.files && Array.isArray(parsed.files)) {
+            parsedFiles = parsed.files;
+            parseSuccess = true;
+            console.log(`✅ Successfully parsed ${parsedFiles.length} files from files array`);
+          }
+          else {
+            throw new Error(`JSON structure not recognized. Keys found: ${Object.keys(parsed).join(', ')}`);
+          }
+          
+        } catch (fallbackError) {
+          console.error('❌ Fallback parsing also failed:', fallbackError);
         }
       }
 
@@ -422,9 +402,9 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
       console.log(urls, "build urls");
       const builtZipUrl = urls.downloadUrl;
       
-      // Deploy to Static Web Apps
-      console.log(`[${buildId}] Deploying to SWA...`);
-      const { previewUrl, downloadUrl } = await deployToSWA(builtZipUrl, buildId);
+      // Deploy using the new deployment method
+      console.log(`[${buildId}] Deploying with new Azure method...`);
+      const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
       // Save project summary with ZIP URL to database
       try {
@@ -453,8 +433,8 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
           modificationApproach: "FULL_FILE_GENERATION" as const,
           modificationSuccess: true,
           buildId: buildId,
-          previewUrl: previewUrl,
-          downloadUrl: downloadUrl,
+          previewUrl: previewUrl as string,
+          downloadUrl: urls.downloadUrl,
           zipUrl: zipUrl,
           sessionId: sessionId // Track session
         };

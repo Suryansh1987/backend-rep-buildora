@@ -46,7 +46,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeModificationRoutes = initializeModificationRoutes;
-// routes/modification.ts - FIXED File modification routes
+// routes/modification.ts - FIXED File modification routes with updated Azure deployment
 const express_1 = __importDefault(require("express"));
 const filemodifier_1 = require("../services/filemodifier");
 const uuid_1 = require("uuid");
@@ -442,7 +442,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 catch (saveError) {
                     console.error('Failed to save modification to history:', saveError);
                 }
-                // BUILD & DEPLOY PIPELINE
+                // BUILD & DEPLOY PIPELINE - UPDATED
                 try {
                     sendEvent('progress', {
                         step: 10,
@@ -506,11 +506,12 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('progress', {
                         step: 12,
                         total: 15,
-                        message: 'Build completed! Deploying to Azure Static Web Apps...',
+                        message: 'Build completed! Deploying with new Azure method...',
                         buildId: buildId,
                         sessionId: sessionId
                     });
-                    const { previewUrl, downloadUrl } = yield (0, azure_deploy_1.deployToSWA)(builtZipUrl, buildId);
+                    // Use the new deployment method
+                    const previewUrl = yield (0, azure_deploy_1.runBuildAndDeploy)(builtZipUrl, buildId);
                     sendEvent('progress', {
                         step: 13,
                         total: 15,
@@ -627,7 +628,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             res.end();
         }
     }));
-    // NON-STREAMING STATELESS MODIFICATION
+    // NON-STREAMING STATELESS MODIFICATION - UPDATED
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e;
         try {
@@ -735,7 +736,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     catch (saveError) {
                         console.error('Failed to save modification to history:', saveError);
                     }
-                    // BUILD & DEPLOY PIPELINE
+                    // BUILD & DEPLOY PIPELINE - UPDATED
                     try {
                         console.log(`[${buildId}] Starting build pipeline after successful stateless modification...`);
                         // DEBUG: Check what files exist in tempBuildDir before zipping
@@ -767,8 +768,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         });
                         const urls = JSON.parse(DistUrl);
                         const builtZipUrl = urls.downloadUrl;
-                        // Deploy to Static Web Apps
-                        const { previewUrl, downloadUrl } = yield (0, azure_deploy_1.deployToSWA)(builtZipUrl, buildId);
+                        // Deploy using the new deployment method
+                        const previewUrl = yield (0, azure_deploy_1.runBuildAndDeploy)(builtZipUrl, buildId);
                         // Update session context with new ZIP URL
                         yield sessionManager.updateSessionContext(sessionId, {
                             projectSummary: Object.assign(Object.assign({}, sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary), { zipUrl: zipUrl, buildId: buildId })
@@ -800,7 +801,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 modificationDuration: modificationDuration,
                                 totalDuration: totalDuration,
                                 totalFilesAffected: (((_c = result.selectedFiles) === null || _c === void 0 ? void 0 : _c.length) || 0) + (((_d = result.addedFiles) === null || _d === void 0 ? void 0 : _d.length) || 0),
-                                // BUILD & DEPLOY RESULTS
+                                // BUILD & DEPLOY RESULTS - UPDATED
                                 previewUrl: previewUrl,
                                 downloadUrl: urls.downloadUrl,
                                 zipUrl: zipUrl, // New ZIP URL for future modifications

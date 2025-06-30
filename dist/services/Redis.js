@@ -132,12 +132,6 @@ class RedisService {
             yield this.redis.setex(key, this.PROJECT_FILES_TTL, JSON.stringify(projectFiles));
         });
     }
-    // ==============================================================
-    // MODIFICATION SUMMARY METHODS - FIXED
-    // ==============================================================
-    /**
-     * Store modification changes for a session
-     */
     setModificationChanges(sessionId, changes) {
         return __awaiter(this, void 0, void 0, function* () {
             const key = `mod_changes:${sessionId}`;
@@ -219,12 +213,6 @@ class RedisService {
             return startTime || new Date().toISOString();
         });
     }
-    // ==============================================================
-    // AST ANALYSIS CACHE METHODS
-    // ==============================================================
-    /**
-     * Cache AST analysis results for a file
-     */
     setASTAnalysis(filePath, fileHash, astNodes) {
         return __awaiter(this, void 0, void 0, function* () {
             const key = `ast_analysis:${fileHash}`;
@@ -236,9 +224,6 @@ class RedisService {
             yield this.redis.setex(key, this.DEFAULT_TTL, JSON.stringify(data));
         });
     }
-    /**
-     * Get cached AST analysis results
-     */
     getASTAnalysis(fileHash) {
         return __awaiter(this, void 0, void 0, function* () {
             const key = `ast_analysis:${fileHash}`;
@@ -258,12 +243,6 @@ class RedisService {
             }
         });
     }
-    // ==============================================================
-    // SESSION STATE METHODS
-    // ==============================================================
-    /**
-     * Store session state data
-     */
     setSessionState(sessionId, key, value) {
         return __awaiter(this, void 0, void 0, function* () {
             const redisKey = `session:${sessionId}:${key}`;

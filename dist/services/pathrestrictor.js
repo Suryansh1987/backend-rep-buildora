@@ -1,6 +1,6 @@
 "use strict";
 // ============================================================================
-// ENHANCED PATH RESTRICTION SYSTEM - Strict src/ Folder Only Modifications
+// CONFIGURABLE PATH RESTRICTION SYSTEM - Adjustable Security Levels
 // ============================================================================
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
@@ -12,13 +12,132 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SafeProjectAnalyzer = exports.SafeFullFileProcessor = exports.SafeComponentAdditionProcessor = exports.PathRestrictionManager = void 0;
+exports.PathRestrictionManager = void 0;
+exports.createPathManager = createPathManager;
 const fs_1 = require("fs");
 const path_1 = require("path");
 class PathRestrictionManager {
-    constructor(reactBasePath) {
+    constructor(reactBasePath, config) {
         this.reactBasePath = (0, path_1.resolve)(reactBasePath);
         this.srcPath = (0, path_1.join)(this.reactBasePath, 'src');
+        // Set default config based on security level
+        this.config = this.mergeWithDefaults(config || {});
+    }
+    mergeWithDefaults(userConfig) {
+        const securityLevel = userConfig.securityLevel || 'moderate';
+        const defaults = this.getDefaultConfigForLevel(securityLevel);
+        return Object.assign(Object.assign(Object.assign({}, defaults), userConfig), { securityLevel });
+    }
+    getDefaultConfigForLevel(level) {
+        switch (level) {
+            case 'strict':
+                return {
+                    securityLevel: 'strict',
+                    allowedDirectories: [
+                        'src/components',
+                        'src/pages',
+                        'src/hooks',
+                        'src/utils',
+                        'src/styles',
+                        'src/assets',
+                        'src/services',
+                        'src/types',
+                        'src/constants',
+                        'src/context'
+                    ],
+                    blockedPatterns: [
+                        { pattern: /\.\./, reason: 'Path traversal attempt' },
+                        { pattern: /^\//, reason: 'Absolute path outside project' },
+                        { pattern: /^[A-Za-z]:/, reason: 'Windows absolute path' },
+                        { pattern: /node_modules/, reason: 'Attempting to modify node_modules' },
+                        { pattern: /\.git/, reason: 'Attempting to modify git files' },
+                        { pattern: /package\.json$/, reason: 'Attempting to modify package.json' },
+                        { pattern: /yarn\.lock$/, reason: 'Attempting to modify yarn.lock' },
+                        { pattern: /package-lock\.json$/, reason: 'Attempting to modify package-lock.json' },
+                        { pattern: /\.env/, reason: 'Attempting to modify environment files' },
+                        { pattern: /build\//, reason: 'Attempting to modify build directory' },
+                        { pattern: /dist\//, reason: 'Attempting to modify dist directory' }
+                    ],
+                    allowPathTraversal: false,
+                    allowAbsolutePaths: false,
+                    requireSrcFolder: true,
+                    auditOperations: true,
+                    validateFileExtensions: true,
+                    allowedExtensions: ['.js', '.jsx', '.ts', '.tsx', '.css', '.scss', '.json']
+                };
+            case 'moderate':
+                return {
+                    securityLevel: 'moderate',
+                    allowedDirectories: [
+                        'src',
+                        'public',
+                        'components',
+                        'pages',
+                        'hooks',
+                        'utils',
+                        'styles',
+                        'assets',
+                        'services',
+                        'types',
+                        'constants',
+                        'context',
+                        'lib',
+                        'config'
+                    ],
+                    blockedPatterns: [
+                        { pattern: /node_modules/, reason: 'Attempting to modify node_modules' },
+                        { pattern: /\.git/, reason: 'Attempting to modify git files' },
+                        { pattern: /package\.json$/, reason: 'Attempting to modify package.json' },
+                        { pattern: /yarn\.lock$/, reason: 'Attempting to modify yarn.lock' },
+                        { pattern: /package-lock\.json$/, reason: 'Attempting to modify package-lock.json' },
+                        { pattern: /\.env/, reason: 'Attempting to modify environment files' }
+                    ],
+                    allowPathTraversal: false,
+                    allowAbsolutePaths: true,
+                    requireSrcFolder: false,
+                    auditOperations: true,
+                    validateFileExtensions: true,
+                    allowedExtensions: ['.js', '.jsx', '.ts', '.tsx', '.css', '.scss', '.json', '.md', '.txt']
+                };
+            case 'relaxed':
+                return {
+                    securityLevel: 'relaxed',
+                    allowedDirectories: [], // Empty = allow all directories
+                    blockedPatterns: [
+                        { pattern: /node_modules/, reason: 'Attempting to modify node_modules' },
+                        { pattern: /\.git/, reason: 'Attempting to modify git files' }
+                    ],
+                    allowPathTraversal: true,
+                    allowAbsolutePaths: true,
+                    requireSrcFolder: false,
+                    auditOperations: false,
+                    validateFileExtensions: false,
+                    allowedExtensions: []
+                };
+            case 'minimal':
+                return {
+                    securityLevel: 'minimal',
+                    allowedDirectories: [],
+                    blockedPatterns: [],
+                    allowPathTraversal: true,
+                    allowAbsolutePaths: true,
+                    requireSrcFolder: false,
+                    auditOperations: false,
+                    validateFileExtensions: false,
+                    allowedExtensions: []
+                };
+            default:
+                return this.getDefaultConfigForLevel('moderate');
+        }
+    }
+    // Method to update security configuration at runtime
+    updateConfig(newConfig) {
+        this.config = Object.assign(Object.assign({}, this.config), newConfig);
+        this.streamUpdate(`🔧 Security configuration updated: ${this.config.securityLevel} level`);
+    }
+    // Method to get current configuration
+    getConfig() {
+        return Object.assign({}, this.config);
     }
     setStreamCallback(callback) {
         this.streamCallback = callback;
@@ -29,47 +148,73 @@ class PathRestrictionManager {
         }
     }
     /**
-     * CRITICAL: Validate that a path is within src/ folder only
+     * CONFIGURABLE: Validate path based on current security settings
      */
     validatePathInSrc(filePath) {
         try {
-            // Normalize and resolve the path
             const normalizedInput = (0, path_1.normalize)(filePath).replace(/\\/g, '/');
             let resolvedPath;
-            // Handle different input formats
-            if (normalizedInput.startsWith('src/')) {
-                // Path starts with src/ - join with base
+            // Handle different input formats based on configuration
+            if (normalizedInput.startsWith('src/') && this.config.requireSrcFolder) {
                 resolvedPath = (0, path_1.resolve)((0, path_1.join)(this.reactBasePath, normalizedInput));
             }
-            else if (normalizedInput.startsWith('/') || normalizedInput.match(/^[A-Za-z]:/)) {
-                // Absolute path - validate it's within our src folder
+            else if ((normalizedInput.startsWith('/') || normalizedInput.match(/^[A-Za-z]:/)) && this.config.allowAbsolutePaths) {
                 resolvedPath = (0, path_1.resolve)(normalizedInput);
             }
-            else {
-                // Relative path - assume it's within src
+            else if (this.config.requireSrcFolder) {
                 resolvedPath = (0, path_1.resolve)((0, path_1.join)(this.srcPath, normalizedInput));
             }
-            // CRITICAL CHECK: Ensure the resolved path is within src folder
-            const relativePath = (0, path_1.relative)(this.srcPath, resolvedPath);
-            // Check for path traversal attempts
-            if (relativePath.startsWith('..') || relativePath.includes('..')) {
-                return {
-                    isValid: false,
-                    normalizedPath: '',
-                    error: `Path traversal detected: ${filePath} resolves outside src folder`
-                };
+            else {
+                // For relaxed/minimal security, allow relative to project root
+                resolvedPath = (0, path_1.resolve)((0, path_1.join)(this.reactBasePath, normalizedInput));
             }
-            // Check if path is actually within src
-            if (!resolvedPath.startsWith(this.srcPath + path_1.sep) && resolvedPath !== this.srcPath) {
-                return {
-                    isValid: false,
-                    normalizedPath: '',
-                    error: `Path ${filePath} is outside src folder: ${resolvedPath}`
-                };
+            // Check for path traversal based on configuration
+            if (!this.config.allowPathTraversal) {
+                const basePath = this.config.requireSrcFolder ? this.srcPath : this.reactBasePath;
+                const relativePath = (0, path_1.relative)(basePath, resolvedPath);
+                if (relativePath.startsWith('..') || relativePath.includes('..')) {
+                    return {
+                        isValid: false,
+                        normalizedPath: '',
+                        error: `Path traversal detected: ${filePath} resolves outside allowed folder`
+                    };
+                }
             }
-            // Return the validated path relative to project root
+            // Check if path is within allowed boundaries based on configuration
+            if (this.config.requireSrcFolder) {
+                if (!resolvedPath.startsWith(this.srcPath + path_1.sep) && resolvedPath !== this.srcPath) {
+                    return {
+                        isValid: false,
+                        normalizedPath: '',
+                        error: `Path ${filePath} is outside src folder: ${resolvedPath}`
+                    };
+                }
+            }
+            else {
+                // For non-strict modes, just ensure it's within project
+                if (!resolvedPath.startsWith(this.reactBasePath + path_1.sep) && resolvedPath !== this.reactBasePath) {
+                    return {
+                        isValid: false,
+                        normalizedPath: '',
+                        error: `Path ${filePath} is outside project folder: ${resolvedPath}`
+                    };
+                }
+            }
+            // Validate file extension if enabled
+            if (this.config.validateFileExtensions && this.config.allowedExtensions && this.config.allowedExtensions.length > 0) {
+                const ext = filePath.substring(filePath.lastIndexOf('.'));
+                if (ext && !this.config.allowedExtensions.includes(ext)) {
+                    return {
+                        isValid: false,
+                        normalizedPath: '',
+                        error: `File extension ${ext} not allowed`
+                    };
+                }
+            }
             const projectRelativePath = (0, path_1.relative)(this.reactBasePath, resolvedPath).replace(/\\/g, '/');
-            this.streamUpdate(`✅ Path validated: ${filePath} → ${projectRelativePath}`);
+            if (this.config.securityLevel !== 'minimal') {
+                this.streamUpdate(`✅ Path validated (${this.config.securityLevel}): ${filePath} → ${projectRelativePath}`);
+            }
             return {
                 isValid: true,
                 normalizedPath: projectRelativePath
@@ -84,18 +229,20 @@ class PathRestrictionManager {
         }
     }
     /**
-     * ENHANCED: Safe file path resolution with strict src restriction
+     * CONFIGURABLE: Safe file path resolution
      */
     resolveSafeFilePath(relativePath) {
         const validation = this.validatePathInSrc(relativePath);
         if (!validation.isValid) {
-            this.streamUpdate(`❌ BLOCKED: ${validation.error}`);
+            if (this.config.securityLevel !== 'minimal') {
+                this.streamUpdate(`❌ BLOCKED (${this.config.securityLevel}): ${validation.error}`);
+            }
             return null;
         }
         return (0, path_1.join)(this.reactBasePath, validation.normalizedPath);
     }
     /**
-     * CRITICAL: Verify file exists and is within src before any operation
+     * CONFIGURABLE: Verify file exists and is accessible
      */
     verifyFileInSrc(filePath) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -103,12 +250,14 @@ class PathRestrictionManager {
             if (!safeResolvedPath) {
                 return {
                     isValid: false,
-                    error: `Path ${filePath} is not within src folder or invalid`
+                    error: `Path ${filePath} is not allowed or invalid (${this.config.securityLevel} mode)`
                 };
             }
             try {
                 yield fs_1.promises.access(safeResolvedPath, fs_1.promises.constants.R_OK | fs_1.promises.constants.W_OK);
-                this.streamUpdate(`✅ File verified in src: ${filePath} → ${safeResolvedPath}`);
+                if (this.config.securityLevel !== 'minimal') {
+                    this.streamUpdate(`✅ File verified (${this.config.securityLevel}): ${filePath} → ${safeResolvedPath}`);
+                }
                 return {
                     isValid: true,
                     resolvedPath: safeResolvedPath
@@ -123,39 +272,47 @@ class PathRestrictionManager {
         });
     }
     /**
-     * CRITICAL: Safe write operation - only within src
+     * CONFIGURABLE: Safe write operation
      */
     safeWriteFile(filePath, content) {
         return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate(`🔒 SAFE WRITE: Attempting to write ${filePath}`);
-            const verification = yield this.verifyFileInSrc(filePath);
-            if (!verification.isValid || !verification.resolvedPath) {
-                this.streamUpdate(`❌ WRITE BLOCKED: ${verification.error}`);
+            if (this.config.securityLevel !== 'minimal') {
+                this.streamUpdate(`🔒 SAFE WRITE (${this.config.securityLevel}): Attempting to write ${filePath}`);
+            }
+            const safeResolvedPath = this.resolveSafeFilePath(filePath);
+            if (!safeResolvedPath) {
                 return {
                     success: false,
-                    error: `Write blocked - ${verification.error}`
+                    error: `Write blocked - Path ${filePath} is not allowed (${this.config.securityLevel} mode)`
                 };
             }
             try {
-                // Ensure directory exists within src
-                const fileDir = (0, path_1.dirname)(verification.resolvedPath);
-                const dirValidation = this.validatePathInSrc((0, path_1.relative)(this.reactBasePath, fileDir));
-                if (!dirValidation.isValid) {
-                    return {
-                        success: false,
-                        error: `Directory outside src: ${fileDir}`
-                    };
+                const fileDir = (0, path_1.dirname)(safeResolvedPath);
+                // For strict mode, validate directory too
+                if (this.config.securityLevel === 'strict') {
+                    const dirValidation = this.validatePathInSrc((0, path_1.relative)(this.reactBasePath, fileDir));
+                    if (!dirValidation.isValid) {
+                        return {
+                            success: false,
+                            error: `Directory not allowed: ${fileDir}`
+                        };
+                    }
                 }
                 yield fs_1.promises.mkdir(fileDir, { recursive: true });
-                yield fs_1.promises.writeFile(verification.resolvedPath, content, 'utf8');
-                this.streamUpdate(`✅ SAFE WRITE SUCCESS: ${verification.resolvedPath}`);
+                yield fs_1.promises.writeFile(safeResolvedPath, content, 'utf8');
+                const stats = yield fs_1.promises.stat(safeResolvedPath);
+                if (this.config.securityLevel !== 'minimal') {
+                    this.streamUpdate(`✅ SAFE WRITE SUCCESS (${this.config.securityLevel}): ${safeResolvedPath} (${stats.size} bytes)`);
+                }
                 return {
                     success: true,
-                    actualPath: verification.resolvedPath
+                    actualPath: safeResolvedPath
                 };
             }
             catch (error) {
-                this.streamUpdate(`❌ WRITE FAILED: ${error}`);
+                if (this.config.securityLevel !== 'minimal') {
+                    this.streamUpdate(`❌ WRITE FAILED: ${error}`);
+                }
                 return {
                     success: false,
                     error: `Write failed: ${error}`
@@ -164,10 +321,49 @@ class PathRestrictionManager {
         });
     }
     /**
-     * ENHANCED: Clean project file paths with validation
+     * CONFIGURABLE: Safe file modification
+     */
+    safeModifyFile(filePath, content) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.config.securityLevel !== 'minimal') {
+                this.streamUpdate(`🔒 SAFE MODIFY (${this.config.securityLevel}): Attempting to modify ${filePath}`);
+            }
+            const verification = yield this.verifyFileInSrc(filePath);
+            if (!verification.isValid || !verification.resolvedPath) {
+                return {
+                    success: false,
+                    error: `Modify blocked - ${verification.error}`
+                };
+            }
+            try {
+                yield fs_1.promises.writeFile(verification.resolvedPath, content, 'utf8');
+                const stats = yield fs_1.promises.stat(verification.resolvedPath);
+                if (this.config.securityLevel !== 'minimal') {
+                    this.streamUpdate(`✅ SAFE MODIFY SUCCESS (${this.config.securityLevel}): ${verification.resolvedPath} (${stats.size} bytes)`);
+                }
+                return {
+                    success: true,
+                    actualPath: verification.resolvedPath
+                };
+            }
+            catch (error) {
+                if (this.config.securityLevel !== 'minimal') {
+                    this.streamUpdate(`❌ MODIFY FAILED: ${error}`);
+                }
+                return {
+                    success: false,
+                    error: `Modify failed: ${error}`
+                };
+            }
+        });
+    }
+    /**
+     * CONFIGURABLE: Clean project file paths with validation
      */
     cleanProjectFilePaths(projectFiles) {
-        this.streamUpdate(`🧹 Cleaning ${projectFiles.size} project file paths...`);
+        if (this.config.securityLevel !== 'minimal') {
+            this.streamUpdate(`🧹 Cleaning ${projectFiles.size} project file paths (${this.config.securityLevel} mode)...`);
+        }
         const cleanedFiles = new Map();
         let validFiles = 0;
         let invalidFiles = 0;
@@ -181,409 +377,161 @@ class PathRestrictionManager {
                     validFiles++;
                 }
                 else {
-                    this.streamUpdate(`⚠️ Skipped invalid path: ${relativePath}`);
                     invalidFiles++;
                 }
             }
             else {
-                this.streamUpdate(`❌ Blocked invalid path: ${relativePath} - ${validation.error}`);
+                if (this.config.securityLevel !== 'minimal') {
+                    this.streamUpdate(`❌ Blocked invalid path: ${relativePath} - ${validation.error}`);
+                }
                 invalidFiles++;
             }
         }
-        this.streamUpdate(`✅ Path cleaning complete: ${validFiles} valid, ${invalidFiles} invalid/blocked`);
+        if (this.config.securityLevel !== 'minimal') {
+            this.streamUpdate(`✅ Path cleaning complete (${this.config.securityLevel}): ${validFiles} valid, ${invalidFiles} invalid/blocked`);
+        }
         return cleanedFiles;
     }
     /**
-     * SECURITY: Check for suspicious file operations
+     * CONFIGURABLE: Check for suspicious file operations
      */
     detectSuspiciousActivity(filePath) {
-        const suspiciousPatterns = [
-            { pattern: /\.\./, reason: 'Path traversal attempt' },
-            { pattern: /^\//, reason: 'Absolute path outside project' },
-            { pattern: /^[A-Za-z]:/, reason: 'Windows absolute path' },
-            { pattern: /node_modules/, reason: 'Attempting to modify node_modules' },
-            { pattern: /\.git/, reason: 'Attempting to modify git files' },
-            { pattern: /package\.json$/, reason: 'Attempting to modify package.json' },
-            { pattern: /yarn\.lock$/, reason: 'Attempting to modify yarn.lock' },
-            { pattern: /package-lock\.json$/, reason: 'Attempting to modify package-lock.json' },
-            { pattern: /\.env/, reason: 'Attempting to modify environment files' },
-            { pattern: /build\//, reason: 'Attempting to modify build directory' },
-            { pattern: /dist\//, reason: 'Attempting to modify dist directory' }
-        ];
-        for (const { pattern, reason } of suspiciousPatterns) {
+        // Skip suspicious activity detection for relaxed/minimal modes
+        if (this.config.securityLevel === 'relaxed' || this.config.securityLevel === 'minimal') {
+            return { isSuspicious: false };
+        }
+        for (const { pattern, reason } of this.config.blockedPatterns || []) {
             if (pattern.test(filePath)) {
-                this.streamUpdate(`🚨 SECURITY ALERT: ${reason} in path: ${filePath}`);
+                this.streamUpdate(`🚨 SECURITY ALERT (${this.config.securityLevel}): ${reason} in path: ${filePath}`);
                 return { isSuspicious: true, reason };
             }
         }
         return { isSuspicious: false };
     }
     /**
-     * AUDIT: Log all file operations for security
+     * CONFIGURABLE: Audit file operations
      */
     auditFileOperation(operation, filePath, success) {
+        if (!this.config.auditOperations) {
+            return;
+        }
         const timestamp = new Date().toISOString();
         const status = success ? 'SUCCESS' : 'FAILED';
         this.streamUpdate(`📋 AUDIT [${timestamp}]: ${operation.toUpperCase()} ${status} - ${filePath}`);
     }
     /**
-     * UTILITY: Get safe src subdirectories
+     * CONFIGURABLE: Get allowed directories based on security level
      */
     getAllowedSrcSubdirectories() {
-        return [
-            'src/components',
-            'src/pages',
-            'src/hooks',
-            'src/utils',
-            'src/styles',
-            'src/assets',
-            'src/services',
-            'src/types',
-            'src/constants',
-            'src/context'
-        ];
+        return this.config.allowedDirectories || [];
     }
     /**
-     * VALIDATION: Ensure file is in allowed src subdirectory
+     * CONFIGURABLE: Check if file is in allowed directory
      */
     isInAllowedDirectory(filePath) {
-        const allowedDirs = this.getAllowedSrcSubdirectories();
+        // For relaxed/minimal modes with empty allowed directories, allow all
+        if (!this.config.allowedDirectories || this.config.allowedDirectories.length === 0) {
+            return true;
+        }
         const validation = this.validatePathInSrc(filePath);
         if (!validation.isValid) {
             return false;
         }
-        // Check if file is directly in src or in an allowed subdirectory
-        if (validation.normalizedPath === 'src' || validation.normalizedPath.startsWith('src/')) {
-            return true;
+        // Check if file is in an allowed directory
+        return this.config.allowedDirectories.some(dir => {
+            const normalizedDir = dir.replace(/\\/g, '/');
+            return validation.normalizedPath.startsWith(normalizedDir) ||
+                validation.normalizedPath === normalizedDir.replace(/\/$/, '');
+        });
+    }
+    // Utility methods for configuration management
+    setSecurityLevel(level) {
+        const newConfig = this.getDefaultConfigForLevel(level);
+        this.config = newConfig;
+        this.streamUpdate(`🔧 Security level changed to: ${level}`);
+    }
+    getCurrentSecurityLevel() {
+        return this.config.securityLevel;
+    }
+    addAllowedDirectory(directory) {
+        if (!this.config.allowedDirectories) {
+            this.config.allowedDirectories = [];
         }
-        return allowedDirs.some(dir => validation.normalizedPath.startsWith(dir));
+        this.config.allowedDirectories.push(directory);
+        this.streamUpdate(`➕ Added allowed directory: ${directory}`);
+    }
+    removeAllowedDirectory(directory) {
+        if (this.config.allowedDirectories) {
+            this.config.allowedDirectories = this.config.allowedDirectories.filter(dir => dir !== directory);
+            this.streamUpdate(`➖ Removed allowed directory: ${directory}`);
+        }
+    }
+    addBlockedPattern(pattern, reason) {
+        if (!this.config.blockedPatterns) {
+            this.config.blockedPatterns = [];
+        }
+        this.config.blockedPatterns.push({ pattern, reason });
+        this.streamUpdate(`🚫 Added blocked pattern: ${pattern.source}`);
+    }
+    removeBlockedPattern(patternSource) {
+        if (this.config.blockedPatterns) {
+            this.config.blockedPatterns = this.config.blockedPatterns.filter(bp => bp.pattern.source !== patternSource);
+            this.streamUpdate(`✅ Removed blocked pattern: ${patternSource}`);
+        }
     }
 }
 exports.PathRestrictionManager = PathRestrictionManager;
 // ============================================================================
-// UPDATED COMPONENT ADDITION PROCESSOR WITH STRICT PATH RESTRICTION
+// FACTORY FUNCTION FOR EASY CONFIGURATION
 // ============================================================================
-class SafeComponentAdditionProcessor {
-    constructor(anthropic, reactBasePath, tokenTracker) {
-        this.anthropic = anthropic;
-        this.reactBasePath = reactBasePath;
-        this.tokenTracker = tokenTracker;
-        this.pathManager = new PathRestrictionManager(reactBasePath);
-    }
-    setStreamCallback(callback) {
-        this.streamCallback = callback;
-        this.pathManager.setStreamCallback(callback);
-    }
-    streamUpdate(message) {
-        if (this.streamCallback) {
-            this.streamCallback(message);
-        }
-    }
-    /**
-     * ENHANCED: Safe component file creation
-     */
-    createComponentSafely(componentName, componentType, content) {
-        return __awaiter(this, void 0, void 0, function* () {
-            // Determine safe file path within src
-            const subDir = componentType === 'page' ? 'pages' : 'components';
-            const fileName = `${componentName}.tsx`;
-            const relativePath = `src/${subDir}/${fileName}`;
-            this.streamUpdate(`🔒 Creating ${componentType} safely: ${relativePath}`);
-            // Validate path is safe
-            const validation = this.pathManager.validatePathInSrc(relativePath);
-            if (!validation.isValid) {
-                return {
-                    success: false,
-                    error: `Invalid path: ${validation.error}`
-                };
-            }
-            // Check for suspicious activity
-            const suspiciousCheck = this.pathManager.detectSuspiciousActivity(relativePath);
-            if (suspiciousCheck.isSuspicious) {
-                return {
-                    success: false,
-                    error: `Suspicious activity detected: ${suspiciousCheck.reason}`
-                };
-            }
-            // Ensure it's in allowed directory
-            if (!this.pathManager.isInAllowedDirectory(relativePath)) {
-                return {
-                    success: false,
-                    error: `Path not in allowed src subdirectory: ${relativePath}`
-                };
-            }
-            // Safe write operation
-            const writeResult = yield this.pathManager.safeWriteFile(relativePath, content);
-            if (writeResult.success) {
-                this.pathManager.auditFileOperation('create', relativePath, true);
-                return {
-                    success: true,
-                    filePath: writeResult.actualPath
-                };
-            }
-            else {
-                this.pathManager.auditFileOperation('create', relativePath, false);
-                return {
-                    success: false,
-                    error: writeResult.error
-                };
-            }
-        });
-    }
-    /**
-     * ENHANCED: Safe App.tsx update with strict validation
-     */
-    updateAppSafely(projectFiles, componentName, content) {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate(`🔒 Updating App.tsx safely...`);
-            // Find App.tsx in safe src paths only
-            const appPaths = ['src/App.tsx', 'src/App.jsx'];
-            let appFile;
-            let appPath;
-            for (const path of appPaths) {
-                const validation = this.pathManager.validatePathInSrc(path);
-                if (validation.isValid) {
-                    appFile = projectFiles.get(validation.normalizedPath);
-                    if (appFile) {
-                        appPath = validation.normalizedPath;
-                        break;
-                    }
-                }
-            }
-            if (!appFile || !appPath) {
-                return {
-                    success: false,
-                    error: 'App.tsx not found in safe src paths'
-                };
-            }
-            // Verify file exists and is safe
-            const verification = yield this.pathManager.verifyFileInSrc(appPath);
-            if (!verification.isValid) {
-                return {
-                    success: false,
-                    error: verification.error
-                };
-            }
-            // Safe write operation
-            const writeResult = yield this.pathManager.safeWriteFile(appPath, content);
-            if (writeResult.success) {
-                this.pathManager.auditFileOperation('write', appPath, true);
-                return {
-                    success: true,
-                    updatedFiles: [appPath]
-                };
-            }
-            else {
-                this.pathManager.auditFileOperation('write', appPath, false);
-                return {
-                    success: false,
-                    error: writeResult.error
-                };
-            }
-        });
-    }
+function createPathManager(reactBasePath, options = {}) {
+    var _a, _b;
+    const config = {
+        securityLevel: options.securityLevel || 'moderate',
+        requireSrcFolder: (_a = options.allowSrcOnly) !== null && _a !== void 0 ? _a : false,
+        auditOperations: (_b = options.enableAudit) !== null && _b !== void 0 ? _b : true,
+        allowedDirectories: options.customAllowedDirs,
+        blockedPatterns: options.customBlockedPatterns
+    };
+    return new PathRestrictionManager(reactBasePath, config);
 }
-exports.SafeComponentAdditionProcessor = SafeComponentAdditionProcessor;
 // ============================================================================
-// UPDATED FULL FILE PROCESSOR WITH PATH RESTRICTION
+// USAGE EXAMPLES
 // ============================================================================
-class SafeFullFileProcessor {
-    constructor(anthropic, tokenTracker, reactBasePath) {
-        this.anthropic = anthropic;
-        this.tokenTracker = tokenTracker;
-        this.pathManager = new PathRestrictionManager(reactBasePath);
-    }
-    setStreamCallback(callback) {
-        this.streamCallback = callback;
-        this.pathManager.setStreamCallback(callback);
-    }
-    streamUpdate(message) {
-        if (this.streamCallback) {
-            this.streamCallback(message);
-        }
-    }
-    /**
-     * ENHANCED: Safe file modification
-     */
-    modifyFileSafely(filePath, modifiedContent, projectFiles) {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate(`🔒 Modifying file safely: ${filePath}`);
-            // Validate file is in project and safe
-            const projectFile = projectFiles.get(filePath);
-            if (!projectFile) {
-                return {
-                    success: false,
-                    error: `File not found in project: ${filePath}`
-                };
-            }
-            // Verify path safety
-            const verification = yield this.pathManager.verifyFileInSrc(filePath);
-            if (!verification.isValid) {
-                return {
-                    success: false,
-                    error: verification.error
-                };
-            }
-            // Check for suspicious activity
-            const suspiciousCheck = this.pathManager.detectSuspiciousActivity(filePath);
-            if (suspiciousCheck.isSuspicious) {
-                return {
-                    success: false,
-                    error: `Suspicious activity: ${suspiciousCheck.reason}`
-                };
-            }
-            // Safe write operation
-            const writeResult = yield this.pathManager.safeWriteFile(filePath, modifiedContent);
-            if (writeResult.success) {
-                // Update project file in memory
-                projectFile.content = modifiedContent;
-                projectFile.lines = modifiedContent.split('\n').length;
-                this.pathManager.auditFileOperation('write', filePath, true);
-                return {
-                    success: true,
-                    actualPath: writeResult.actualPath
-                };
-            }
-            else {
-                this.pathManager.auditFileOperation('write', filePath, false);
-                return {
-                    success: false,
-                    error: writeResult.error
-                };
-            }
-        });
-    }
-}
-exports.SafeFullFileProcessor = SafeFullFileProcessor;
-// ============================================================================
-// UPDATED PROJECT ANALYZER WITH PATH RESTRICTION
-// ============================================================================
-class SafeProjectAnalyzer {
-    constructor(reactBasePath) {
-        this.reactBasePath = reactBasePath;
-        this.pathManager = new PathRestrictionManager(reactBasePath);
-    }
-    setStreamCallback(callback) {
-        this.streamCallback = callback;
-        this.pathManager.setStreamCallback(callback);
-    }
-    streamUpdate(message) {
-        if (this.streamCallback) {
-            this.streamCallback(message);
-        }
-    }
-    /**
-     * ENHANCED: Safe project tree building - src only
-     */
-    buildProjectTreeSafely(projectFiles) {
-        return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('🔒 Building project tree safely - src folder only...');
-            const srcPath = (0, path_1.join)(this.reactBasePath, 'src');
-            try {
-                yield fs_1.promises.access(srcPath);
-                this.streamUpdate('✅ src directory verified');
-            }
-            catch (error) {
-                throw new Error(`src directory not accessible: ${srcPath}`);
-            }
-            projectFiles.clear();
-            let scannedFiles = 0;
-            let validFiles = 0;
-            let blockedFiles = 0;
-            const scanSrcOnly = (dir_1, ...args_1) => __awaiter(this, [dir_1, ...args_1], void 0, function* (dir, relativePath = '') {
-                try {
-                    const entries = yield fs_1.promises.readdir(dir, { withFileTypes: true });
-                    for (const entry of entries) {
-                        const fullPath = (0, path_1.join)(dir, entry.name);
-                        const relPath = relativePath ? (0, path_1.join)(relativePath, entry.name) : entry.name;
-                        const srcRelativePath = `src/${relPath}`;
-                        // Validate every path
-                        const validation = this.pathManager.validatePathInSrc(srcRelativePath);
-                        if (!validation.isValid) {
-                            this.streamUpdate(`❌ BLOCKED: ${validation.error}`);
-                            blockedFiles++;
-                            continue;
-                        }
-                        if (entry.isDirectory() && !entry.name.startsWith('.')) {
-                            // Only scan allowed subdirectories
-                            if (this.pathManager.isInAllowedDirectory(srcRelativePath)) {
-                                yield scanSrcOnly(fullPath, relPath);
-                            }
-                            else {
-                                this.streamUpdate(`⏭️ Skipping non-allowed directory: ${srcRelativePath}`);
-                            }
-                        }
-                        else if (entry.isFile() && /\.(js|jsx|ts|tsx)$/.test(entry.name)) {
-                            scannedFiles++;
-                            // Additional safety checks
-                            const suspiciousCheck = this.pathManager.detectSuspiciousActivity(srcRelativePath);
-                            if (suspiciousCheck.isSuspicious) {
-                                this.streamUpdate(`🚨 BLOCKED suspicious file: ${srcRelativePath}`);
-                                blockedFiles++;
-                                continue;
-                            }
-                            // Safe file analysis
-                            const analysisResult = yield this.analyzeFileSafely(fullPath, validation.normalizedPath);
-                            if (analysisResult) {
-                                projectFiles.set(validation.normalizedPath, analysisResult);
-                                validFiles++;
-                                this.streamUpdate(`✅ Added safe file: ${validation.normalizedPath}`);
-                            }
-                            else {
-                                blockedFiles++;
-                            }
-                        }
-                    }
-                }
-                catch (error) {
-                    this.streamUpdate(`⚠️ Error scanning directory ${dir}: ${error}`);
-                }
-            });
-            yield scanSrcOnly(srcPath);
-            this.streamUpdate(`🔒 Safe project analysis complete:`);
-            this.streamUpdate(`   Scanned: ${scannedFiles} files`);
-            this.streamUpdate(`   Valid: ${validFiles} files`);
-            this.streamUpdate(`   Blocked: ${blockedFiles} files`);
-            this.streamUpdate(`   Total in cache: ${projectFiles.size} files`);
-        });
-    }
-    /**
-     * SAFE: Analyze individual file
-     */
-    analyzeFileSafely(filePath, relativePath) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const verification = yield this.pathManager.verifyFileInSrc(relativePath);
-                if (!verification.isValid) {
-                    return null;
-                }
-                const content = yield fs_1.promises.readFile(filePath, 'utf8');
-                const stats = yield fs_1.promises.stat(filePath);
-                const lines = content.split('\n');
-                return {
-                    name: require('path').basename(filePath),
-                    path: filePath,
-                    relativePath,
-                    content,
-                    lines: lines.length,
-                    size: stats.size,
-                    snippet: lines.slice(0, 15).join('\n'),
-                    componentName: this.extractComponentName(content),
-                    hasButtons: /button|Button/i.test(content),
-                    hasSignin: /signin|login/i.test(content),
-                    isMainFile: /App\.(tsx|jsx)$/.test(filePath)
-                };
-            }
-            catch (error) {
-                this.streamUpdate(`❌ Failed to analyze ${relativePath}: ${error}`);
-                return null;
-            }
-        });
-    }
-    extractComponentName(content) {
-        const match = content.match(/(?:function|const)\s+([A-Z]\w+)/);
-        return match ? match[1] : 'Unknown';
-    }
-}
-exports.SafeProjectAnalyzer = SafeProjectAnalyzer;
+/*
+// Example 1: Minimal restrictions (almost no security)
+const minimalManager = new PathRestrictionManager('/path/to/project', {
+  securityLevel: 'minimal'
+});
+
+// Example 2: Moderate restrictions (balanced security)
+const moderateManager = new PathRestrictionManager('/path/to/project', {
+  securityLevel: 'moderate',
+  requireSrcFolder: false,
+  allowAbsolutePaths: true
+});
+
+// Example 3: Custom configuration
+const customManager = new PathRestrictionManager('/path/to/project', {
+  securityLevel: 'relaxed',
+  allowedDirectories: ['src', 'components', 'pages', 'utils', 'styles'],
+  blockedPatterns: [
+    { pattern: /node_modules/, reason: 'No node_modules access' }
+  ],
+  auditOperations: false
+});
+
+// Example 4: Using factory function
+const easyManager = createPathManager('/path/to/project', {
+  securityLevel: 'relaxed',
+  allowSrcOnly: false,
+  enableAudit: false
+});
+
+// Example 5: Runtime configuration changes
+const manager = new PathRestrictionManager('/path/to/project');
+manager.setSecurityLevel('relaxed');
+manager.addAllowedDirectory('custom');
+manager.updateConfig({ auditOperations: false });
+*/ 
 //# sourceMappingURL=pathrestrictor.js.map

@@ -22,9 +22,6 @@ export declare class RedisService {
      * Add or update a single project file - FIXED
      */
     updateProjectFile(sessionId: string, filePath: string, projectFile: ProjectFile): Promise<void>;
-    /**
-     * Store modification changes for a session
-     */
     setModificationChanges(sessionId: string, changes: ModificationChange[]): Promise<void>;
     /**
      * Get modification changes for a session - FIXED
@@ -42,20 +39,11 @@ export declare class RedisService {
      * Get session start time
      */
     getSessionStartTime(sessionId: string): Promise<string>;
-    /**
-     * Cache AST analysis results for a file
-     */
     setASTAnalysis(filePath: string, fileHash: string, astNodes: ASTNode[]): Promise<void>;
-    /**
-     * Get cached AST analysis results
-     */
     getASTAnalysis(fileHash: string): Promise<{
         filePath: string;
         astNodes: ASTNode[];
     } | null>;
-    /**
-     * Store session state data
-     */
     setSessionState(sessionId: string, key: string, value: any): Promise<void>;
     /**
      * Get session state data

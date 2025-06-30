@@ -1,13 +1,33 @@
 import { ProjectFile } from './filemodifier/types';
+export type SecurityLevel = 'strict' | 'moderate' | 'relaxed' | 'minimal';
+export interface PathRestrictionConfig {
+    securityLevel: SecurityLevel;
+    allowedDirectories?: string[];
+    blockedPatterns?: Array<{
+        pattern: RegExp;
+        reason: string;
+    }>;
+    allowPathTraversal?: boolean;
+    allowAbsolutePaths?: boolean;
+    requireSrcFolder?: boolean;
+    auditOperations?: boolean;
+    validateFileExtensions?: boolean;
+    allowedExtensions?: string[];
+}
 export declare class PathRestrictionManager {
     private reactBasePath;
     private srcPath;
     private streamCallback?;
-    constructor(reactBasePath: string);
+    private config;
+    constructor(reactBasePath: string, config?: Partial<PathRestrictionConfig>);
+    private mergeWithDefaults;
+    private getDefaultConfigForLevel;
+    updateConfig(newConfig: Partial<PathRestrictionConfig>): void;
+    getConfig(): PathRestrictionConfig;
     setStreamCallback(callback: (message: string) => void): void;
     private streamUpdate;
     /**
-     * CRITICAL: Validate that a path is within src/ folder only
+     * CONFIGURABLE: Validate path based on current security settings
      */
     validatePathInSrc(filePath: string): {
         isValid: boolean;
@@ -15,11 +35,11 @@ export declare class PathRestrictionManager {
         error?: string;
     };
     /**
-     * ENHANCED: Safe file path resolution with strict src restriction
+     * CONFIGURABLE: Safe file path resolution
      */
     resolveSafeFilePath(relativePath: string): string | null;
     /**
-     * CRITICAL: Verify file exists and is within src before any operation
+     * CONFIGURABLE: Verify file exists and is accessible
      */
     verifyFileInSrc(filePath: string): Promise<{
         isValid: boolean;
@@ -27,7 +47,7 @@ export declare class PathRestrictionManager {
         error?: string;
     }>;
     /**
-     * CRITICAL: Safe write operation - only within src
+     * CONFIGURABLE: Safe write operation
      */
     safeWriteFile(filePath: string, content: string): Promise<{
         success: boolean;
@@ -35,86 +55,50 @@ export declare class PathRestrictionManager {
         error?: string;
     }>;
     /**
-     * ENHANCED: Clean project file paths with validation
+     * CONFIGURABLE: Safe file modification
+     */
+    safeModifyFile(filePath: string, content: string): Promise<{
+        success: boolean;
+        actualPath?: string;
+        error?: string;
+    }>;
+    /**
+     * CONFIGURABLE: Clean project file paths with validation
      */
     cleanProjectFilePaths(projectFiles: Map<string, ProjectFile>): Map<string, ProjectFile>;
     /**
-     * SECURITY: Check for suspicious file operations
+     * CONFIGURABLE: Check for suspicious file operations
      */
     detectSuspiciousActivity(filePath: string): {
         isSuspicious: boolean;
         reason?: string;
     };
     /**
-     * AUDIT: Log all file operations for security
+     * CONFIGURABLE: Audit file operations
      */
     auditFileOperation(operation: 'read' | 'write' | 'create', filePath: string, success: boolean): void;
     /**
-     * UTILITY: Get safe src subdirectories
+     * CONFIGURABLE: Get allowed directories based on security level
      */
     getAllowedSrcSubdirectories(): string[];
     /**
-     * VALIDATION: Ensure file is in allowed src subdirectory
+     * CONFIGURABLE: Check if file is in allowed directory
      */
     isInAllowedDirectory(filePath: string): boolean;
+    setSecurityLevel(level: SecurityLevel): void;
+    getCurrentSecurityLevel(): SecurityLevel;
+    addAllowedDirectory(directory: string): void;
+    removeAllowedDirectory(directory: string): void;
+    addBlockedPattern(pattern: RegExp, reason: string): void;
+    removeBlockedPattern(patternSource: string): void;
 }
-export declare class SafeComponentAdditionProcessor {
-    private pathManager;
-    private anthropic;
-    private reactBasePath;
-    private tokenTracker;
-    private streamCallback?;
-    constructor(anthropic: any, reactBasePath: string, tokenTracker: any);
-    setStreamCallback(callback: (message: string) => void): void;
-    private streamUpdate;
-    /**
-     * ENHANCED: Safe component file creation
-     */
-    createComponentSafely(componentName: string, componentType: 'component' | 'page', content: string): Promise<{
-        success: boolean;
-        filePath?: string;
-        error?: string;
+export declare function createPathManager(reactBasePath: string, options?: {
+    securityLevel?: SecurityLevel;
+    allowSrcOnly?: boolean;
+    enableAudit?: boolean;
+    customAllowedDirs?: string[];
+    customBlockedPatterns?: Array<{
+        pattern: RegExp;
+        reason: string;
     }>;
-    /**
-     * ENHANCED: Safe App.tsx update with strict validation
-     */
-    updateAppSafely(projectFiles: Map<string, ProjectFile>, componentName: string, content: string): Promise<{
-        success: boolean;
-        updatedFiles?: string[];
-        error?: string;
-    }>;
-}
-export declare class SafeFullFileProcessor {
-    private pathManager;
-    private anthropic;
-    private tokenTracker;
-    private streamCallback?;
-    constructor(anthropic: any, tokenTracker: any, reactBasePath: string);
-    setStreamCallback(callback: (message: string) => void): void;
-    private streamUpdate;
-    /**
-     * ENHANCED: Safe file modification
-     */
-    modifyFileSafely(filePath: string, modifiedContent: string, projectFiles: Map<string, ProjectFile>): Promise<{
-        success: boolean;
-        actualPath?: string;
-        error?: string;
-    }>;
-}
-export declare class SafeProjectAnalyzer {
-    private pathManager;
-    private reactBasePath;
-    private streamCallback?;
-    constructor(reactBasePath: string);
-    setStreamCallback(callback: (message: string) => void): void;
-    private streamUpdate;
-    /**
-     * ENHANCED: Safe project tree building - src only
-     */
-    buildProjectTreeSafely(projectFiles: Map<string, ProjectFile>): Promise<void>;
-    /**
-     * SAFE: Analyze individual file
-     */
-    private analyzeFileSafely;
-    private extractComponentName;
-}
+}): PathRestrictionManager;

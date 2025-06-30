@@ -54,25 +54,20 @@ const path_1 = __importDefault(require("path"));
 const messagesummary_1 = require("./db/messagesummary");
 const cors_1 = __importDefault(require("cors"));
 const fs = __importStar(require("fs"));
-// Import existing routes
 const users_1 = __importDefault(require("./routes/users"));
 const projects_1 = __importDefault(require("./routes/projects"));
 const messages_1 = __importDefault(require("./routes/messages"));
-// Import new organized routes
 const session_1 = require("./routes/session");
 const generation_1 = require("./routes/generation");
 const modification_1 = require("./routes/modification");
 const conversation_1 = require("./routes/conversation");
 const redis_stats_1 = require("./routes/redis-stats");
-// Initialize core services
 const anthropic = new sdk_1.default();
 const app = (0, express_1.default)();
 const redis = new Redis_1.RedisService();
-// Initialize database and session manager
 const DATABASE_URL = process.env.DATABASE_URL;
 const messageDB = new messagesummary_1.DrizzleMessageHistoryDB(DATABASE_URL, anthropic);
 const sessionManager = new session_1.StatelessSessionManager(redis);
-// Middleware setup
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
 app.use((req, res, next) => {
@@ -88,7 +83,6 @@ app.use((req, res, next) => {
         next();
     }
 });
-// Initialize services
 function initializeServices() {
     return __awaiter(this, void 0, void 0, function* () {
         try {
@@ -107,7 +101,6 @@ function initializeServices() {
 }
 initializeServices();
 console.log('📊 Database URL configured:', !!process.env.DATABASE_URL);
-// Basic health endpoint
 app.get("/", (req, res) => {
     res.json({
         message: "Backend is up with Redis stateless integration",
@@ -129,17 +122,14 @@ app.get("/health", (req, res) => {
         ]
     });
 });
-// Mount existing routes
 app.use("/api/users", users_1.default);
 app.use("/api/projects", projects_1.default);
 app.use("/api/messages", messages_1.default);
-// Mount new organized routes with Redis integration
 app.use("/api/session", (0, session_1.initializeSessionRoutes)(redis));
 app.use("/api/generate", (0, generation_1.initializeGenerationRoutes)(anthropic, messageDB, sessionManager));
 app.use("/api/modify", (0, modification_1.initializeModificationRoutes)(anthropic, messageDB, redis, sessionManager));
 app.use("/api/conversation", (0, conversation_1.initializeConversationRoutes)(messageDB, redis, sessionManager));
 app.use("/api/redis", (0, redis_stats_1.initializeRedisRoutes)(redis));
-// Legacy endpoints for backward compatibility (redirect to new organized routes)
 app.post("/api/projects/generate", (req, res) => {
     console.log('🔄 Redirecting legacy /api/projects/generate to /api/generate');
     req.url = '/api/generate';
@@ -205,7 +195,6 @@ app.get("/redis-health", (req, res) => {
     req.url = '/api/redis/health';
     app._router.handle(req, res);
 });
-// Background cleanup job for temp directories
 setInterval(() => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const tempBuildsDir = path_1.default.join(__dirname, "../temp-builds");

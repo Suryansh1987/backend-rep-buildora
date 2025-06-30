@@ -1,4 +1,4 @@
-// routes/modification.ts - FIXED File modification routes
+// routes/modification.ts - FIXED File modification routes with updated Azure deployment
 import express, { Request, Response } from "express";
 import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 import { StatelessSessionManager } from './session';
@@ -14,6 +14,7 @@ import {
   uploadToAzureBlob,
   triggerAzureContainerJob,
   deployToSWA,
+  runBuildAndDeploy,
 } from "../services/azure-deploy";
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -450,7 +451,7 @@ export function initializeModificationRoutes(
           console.error('Failed to save modification to history:', saveError);
         }
 
-        // BUILD & DEPLOY PIPELINE
+        // BUILD & DEPLOY PIPELINE - UPDATED
         try {
           sendEvent('progress', { 
             step: 10, 
@@ -527,12 +528,13 @@ export function initializeModificationRoutes(
           sendEvent('progress', { 
             step: 12, 
             total: 15, 
-            message: 'Build completed! Deploying to Azure Static Web Apps...',
+            message: 'Build completed! Deploying with new Azure method...',
             buildId: buildId,
             sessionId: sessionId
           });
           
-          const { previewUrl, downloadUrl } = await deployToSWA(builtZipUrl, buildId);
+          // Use the new deployment method
+          const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
           sendEvent('progress', { 
             step: 13, 
@@ -667,7 +669,7 @@ export function initializeModificationRoutes(
     }
   });
 
-  // NON-STREAMING STATELESS MODIFICATION
+  // NON-STREAMING STATELESS MODIFICATION - UPDATED
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     try {
       const { prompt, sessionId: clientSessionId } = req.body;
@@ -792,7 +794,7 @@ export function initializeModificationRoutes(
             console.error('Failed to save modification to history:', saveError);
           }
 
-          // BUILD & DEPLOY PIPELINE
+          // BUILD & DEPLOY PIPELINE - UPDATED
           try {
             console.log(`[${buildId}] Starting build pipeline after successful stateless modification...`);
             
@@ -835,8 +837,8 @@ export function initializeModificationRoutes(
             const urls = JSON.parse(DistUrl);
             const builtZipUrl = urls.downloadUrl;
             
-            // Deploy to Static Web Apps
-            const { previewUrl, downloadUrl } = await deployToSWA(builtZipUrl, buildId);
+            // Deploy using the new deployment method
+            const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
             // Update session context with new ZIP URL
             await sessionManager.updateSessionContext(sessionId, {
@@ -878,7 +880,7 @@ export function initializeModificationRoutes(
                 modificationDuration: modificationDuration,
                 totalDuration: totalDuration,
                 totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
-                // BUILD & DEPLOY RESULTS
+                // BUILD & DEPLOY RESULTS - UPDATED
                 previewUrl: previewUrl,
                 downloadUrl: urls.downloadUrl,
                 zipUrl: zipUrl, // New ZIP URL for future modifications

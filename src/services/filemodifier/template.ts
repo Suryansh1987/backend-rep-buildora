@@ -573,6 +573,7 @@ Generate the complete App.tsx file with professional navigation and routing.
 **REQUIREMENTS:**
 - Beautiful sticky navigation header with gradient background
 - Smooth routing between pages with React Router
+-import will be like as every page or component will be default export
 - Mobile hamburger menu with animations
 - Professional design with consistent theme
 - Responsive navigation that works on all devices

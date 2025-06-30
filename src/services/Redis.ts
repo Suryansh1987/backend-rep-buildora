@@ -142,13 +142,7 @@ export class RedisService {
     await this.redis.setex(key, this.PROJECT_FILES_TTL, JSON.stringify(projectFiles));
   }
 
-  // ==============================================================
-  // MODIFICATION SUMMARY METHODS - FIXED
-  // ==============================================================
-
-  /**
-   * Store modification changes for a session
-   */
+  
   async setModificationChanges(sessionId: string, changes: ModificationChange[]): Promise<void> {
     const key = `mod_changes:${sessionId}`;
     
@@ -228,13 +222,7 @@ export class RedisService {
     return startTime || new Date().toISOString();
   }
 
-  // ==============================================================
-  // AST ANALYSIS CACHE METHODS
-  // ==============================================================
 
-  /**
-   * Cache AST analysis results for a file
-   */
   async setASTAnalysis(filePath: string, fileHash: string, astNodes: ASTNode[]): Promise<void> {
     const key = `ast_analysis:${fileHash}`;
     const data = {
@@ -245,9 +233,7 @@ export class RedisService {
     await this.redis.setex(key, this.DEFAULT_TTL, JSON.stringify(data));
   }
 
-  /**
-   * Get cached AST analysis results
-   */
+ 
   async getASTAnalysis(fileHash: string): Promise<{ filePath: string; astNodes: ASTNode[] } | null> {
     const key = `ast_analysis:${fileHash}`;
     const data = await this.redis.get(key);
@@ -266,13 +252,7 @@ export class RedisService {
     }
   }
 
-  // ==============================================================
-  // SESSION STATE METHODS
-  // ==============================================================
-
-  /**
-   * Store session state data
-   */
+ 
   async setSessionState(sessionId: string, key: string, value: any): Promise<void> {
     const redisKey = `session:${sessionId}:${key}`;
     await this.redis.setex(redisKey, this.SESSION_TTL, JSON.stringify(value));
