@@ -4,7 +4,7 @@ import * as schema from "./project_schema";
 const db = drizzle(process.env.DATABASE_URL);
 
 
-// Disable prefetch as it is not supported for "Transaction" pool mode
+
 
 export type User = typeof schema.users.$inferSelect;
 export type NewUser = typeof schema.users.$inferInsert;
