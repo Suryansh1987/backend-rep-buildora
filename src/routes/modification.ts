@@ -1,4 +1,4 @@
-// routes/modification.ts - Updated with Enhanced URL Manager and improved duplicate prevention
+// routes/modification.ts - Complete Updated with Enhanced URL Manager and URL-based project resolution
 import express, { Request, Response } from "express";
 import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 import { StatelessSessionManager } from './session';
@@ -82,6 +82,114 @@ class StatelessConversationHelper {
   }
 }
 
+// URL normalization for reliable matching
+function normalizeUrl(url: string): string {
+  if (!url) return '';
+  
+  try {
+    // Remove protocol, www, trailing slashes, and query params for comparison
+    let normalized = url.toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .replace(/\/$/, '')
+      .split('?')[0]
+      .split('#')[0];
+    
+    return normalized;
+  } catch (error) {
+    console.error('Error normalizing URL:', url, error);
+    return url.toLowerCase();
+  }
+}
+
+// Enhanced project resolution based on deployed URL
+async function resolveProjectByDeployedUrl(
+  messageDB: DrizzleMessageHistoryDB,
+  urlManager: EnhancedProjectUrlManager,
+  userId: number,
+  deployedUrl?: string,
+  sessionId?: string
+): Promise<{ projectId: number | null; project: any | null; matchReason: string }> {
+  try {
+    // Get all user projects
+    const userProjects = await messageDB.getUserProjects(userId);
+    
+    if (userProjects.length === 0) {
+      return { 
+        projectId: null, 
+        project: null, 
+        matchReason: 'no_user_projects' 
+      };
+    }
+
+    // Priority 1: Match by deployed URL (most reliable)
+    if (deployedUrl) {
+      console.log(`🔍 Looking for project with deployed URL: ${deployedUrl}`);
+      
+      // Clean and normalize URLs for comparison
+      const normalizedTargetUrl = normalizeUrl(deployedUrl);
+      
+      const urlMatch = userProjects.find(project => {
+        if (!project.deploymentUrl) return false;
+        
+        const normalizedProjectUrl = normalizeUrl(project.deploymentUrl);
+        const isMatch = normalizedProjectUrl === normalizedTargetUrl;
+        
+        if (isMatch) {
+          console.log(`✅ URL match found: ${project.deploymentUrl} -> Project: ${project.name}`);
+        }
+        
+        return isMatch;
+      });
+      
+      if (urlMatch) {
+        return {
+          projectId: urlMatch.id,
+          project: urlMatch,
+          matchReason: 'deployed_url_match'
+        };
+      } else {
+        console.log(`⚠️ No project found with deployed URL: ${deployedUrl}`);
+        console.log('Available project URLs:');
+        userProjects.forEach(p => {
+          console.log(`  - ${p.name}: ${p.deploymentUrl || 'No URL'}`);
+        });
+      }
+    }
+
+    // Priority 2: Try session-based matching as fallback
+    if (sessionId) {
+      const sessionProject = await messageDB.getProjectBySessionId(sessionId);
+      if (sessionProject && userProjects.find(p => p.id === sessionProject.id)) {
+        console.log(`✅ Fallback to session project: ${sessionProject.id} (${sessionProject.name})`);
+        return {
+          projectId: sessionProject.id,
+          project: sessionProject,
+          matchReason: 'session_fallback'
+        };
+      }
+    }
+
+    // Priority 3: Use most recent project as last resort
+    const recentProject = userProjects[0];
+    console.log(`⚠️ No URL match found, using most recent project: ${recentProject.name}`);
+    
+    return {
+      projectId: recentProject.id,
+      project: recentProject,
+      matchReason: 'recent_fallback'
+    };
+
+  } catch (error) {
+    console.error('❌ Failed to resolve project by URL:', error);
+    return {
+      projectId: null,
+      project: null,
+      matchReason: 'resolution_error'
+    };
+  }
+}
+
 // FALLBACK USER RESOLUTION FUNCTION
 async function resolveUserId(
   messageDB: DrizzleMessageHistoryDB,
@@ -120,39 +228,6 @@ async function resolveUserId(
   } catch (error) {
     console.error('❌ Failed to resolve user ID:', error);
     throw new Error('Could not resolve or create user');
-  }
-}
-
-// SIMPLIFIED PROJECT RESOLUTION - Gets current project ID for updates (NO EXPLICIT PROJECT ID)
-async function resolveCurrentProject(
-  messageDB: DrizzleMessageHistoryDB,
-  urlManager: EnhancedProjectUrlManager,
-  userId: number,
-  sessionId?: string
-): Promise<{ projectId: number | null; project: any | null }> {
-  try {
-    // Priority 1: Get user's most recent project
-    const userProjects = await messageDB.getUserProjects(userId);
-    if (userProjects.length > 0) {
-      const recentProject = userProjects[0]; // Most recent project
-      console.log(`✅ Using user's most recent project: ${recentProject.id}`);
-      return { projectId: recentProject.id, project: recentProject };
-    }
-
-    // Priority 2: Check session for project
-    if (sessionId) {
-      const sessionProject = await messageDB.getProjectBySessionId(sessionId);
-      if (sessionProject) {
-        console.log(`✅ Using session project: ${sessionProject.id}`);
-        return { projectId: sessionProject.id, project: sessionProject };
-      }
-    }
-
-    console.log(`⚠️ No current project found for user ${userId}`);
-    return { projectId: null, project: null };
-  } catch (error) {
-    console.error('❌ Failed to resolve current project:', error);
-    return { projectId: null, project: null };
   }
 }
 
@@ -202,6 +277,28 @@ async function cleanupTempDirectory(buildId: string): Promise<void> {
   }
 }
 
+// Database helper to find project by URL
+async function findProjectByUrl(
+  messageDB: DrizzleMessageHistoryDB,
+  userId: number,
+  searchUrl: string
+): Promise<any | null> {
+  try {
+    const userProjects = await messageDB.getUserProjects(userId);
+    const normalizedSearchUrl = normalizeUrl(searchUrl);
+    
+    const match = userProjects.find(project => {
+      if (!project.deploymentUrl) return false;
+      return normalizeUrl(project.deploymentUrl) === normalizedSearchUrl;
+    });
+    
+    return match || null;
+  } catch (error) {
+    console.error('Error finding project by URL:', error);
+    return null;
+  }
+}
+
 // Initialize routes with dependencies
 export function initializeModificationRoutes(
   anthropic: Anthropic,
@@ -213,12 +310,14 @@ export function initializeModificationRoutes(
   const conversationHelper = new StatelessConversationHelper(messageDB, redis);
   const urlManager = new EnhancedProjectUrlManager(messageDB);
 
-  // STATELESS STREAMING MODIFICATION ENDPOINT
+  // STATELESS STREAMING MODIFICATION ENDPOINT WITH URL-BASED RESOLUTION
   router.post("/stream", async (req: Request, res: Response): Promise<void> => {
     const { 
       prompt, 
       sessionId: clientSessionId,
-      userId: providedUserId
+      userId: providedUserId,
+      currentUrl,    // NEW: Current page URL
+      deployedUrl    // NEW: Deployed app URL
     } = req.body;
     
     if (!prompt) {
@@ -249,6 +348,8 @@ export function initializeModificationRoutes(
     }
     
     console.log(`[${buildId}] Starting modification for user: ${userId}, session: ${sessionId}`);
+    console.log(`[${buildId}] Current URL: ${currentUrl || 'not provided'}`);
+    console.log(`[${buildId}] Deployed URL: ${deployedUrl || 'not provided'}`);
     console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
 
     res.writeHead(200, {
@@ -273,13 +374,69 @@ export function initializeModificationRoutes(
     try {
       sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
 
-      // RESOLVE CURRENT PROJECT ID FOR UPDATING
-      const { projectId: currentProjectId, project: currentProject } = await resolveCurrentProject(
+      // ENHANCED PROJECT RESOLUTION BY DEPLOYED URL
+      const { projectId: currentProjectId, project: currentProject, matchReason } = await resolveProjectByDeployedUrl(
         messageDB, 
         urlManager, 
         userId, 
+        deployedUrl || currentUrl,
         sessionId
       );
+
+      console.log(`[${buildId}] Project resolution result: ${matchReason}`);
+      console.log(`[${buildId}] Target URL: ${deployedUrl || currentUrl || 'none provided'}`);
+
+      if (currentProjectId) {
+        console.log(`[${buildId}] ✅ Selected project: "${currentProject.name}" (ID: ${currentProjectId})`);
+        console.log(`[${buildId}] Project URL: ${currentProject.deploymentUrl}`);
+      } else {
+        console.log(`[${buildId}] ⚠️ No existing project matched, will create new one`);
+      }
+
+      // Enhanced progress messaging based on match reason
+      if (matchReason === 'deployed_url_match') {
+        sendEvent('progress', { 
+          step: 2, 
+          total: 16, 
+          message: `✅ Found project: "${currentProject.name}" (URL match)`,
+          buildId, 
+          sessionId,
+          projectId: currentProjectId,
+          projectName: currentProject.name,
+          matchReason
+        });
+      } else if (matchReason === 'session_fallback') {
+        sendEvent('progress', { 
+          step: 2, 
+          total: 16, 
+          message: `📋 Using session project: "${currentProject.name}"`,
+          buildId, 
+          sessionId,
+          projectId: currentProjectId,
+          projectName: currentProject.name,
+          matchReason
+        });
+      } else if (matchReason === 'recent_fallback') {
+        sendEvent('progress', { 
+          step: 2, 
+          total: 16, 
+          message: `⚠️ No URL match. Using recent: "${currentProject.name}"`,
+          buildId, 
+          sessionId,
+          projectId: currentProjectId,
+          projectName: currentProject.name,
+          matchReason
+        });
+      } else {
+        sendEvent('progress', { 
+          step: 2, 
+          total: 16, 
+          message: 'No existing project found. Starting fresh...',
+          buildId, 
+          sessionId,
+          matchReason
+        });
+      }
 
       let sessionContext = await sessionManager.getSessionContext(sessionId);
       let tempBuildDir: string = '';
@@ -287,7 +444,7 @@ export function initializeModificationRoutes(
 
       // Enhanced project resolution using URL manager
       if (currentProjectId) {
-        sendEvent('progress', { step: 2, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
+        sendEvent('progress', { step: 3, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
         const projectUrls = await urlManager.getProjectUrls({ projectId: currentProjectId });
         if (projectUrls && projectUrls.zipUrl) {
           tempBuildDir = await downloadAndExtractProject(buildId, projectUrls.zipUrl);
@@ -305,7 +462,7 @@ export function initializeModificationRoutes(
         }
       } else {
         // Fallback logic
-        sendEvent('progress', { step: 2, total: 16, message: 'No current project found. Checking Redis...', buildId, sessionId });
+        sendEvent('progress', { step: 3, total: 16, message: 'No current project found. Checking Redis...', buildId, sessionId });
 
         sessionContext = await sessionManager.getSessionContext(sessionId);
 
@@ -343,7 +500,7 @@ export function initializeModificationRoutes(
         }
       }
 
-      sendEvent('progress', { step: 3, total: 16, message: 'Project environment ready!', buildId, sessionId });
+      sendEvent('progress', { step: 4, total: 16, message: 'Project environment ready!', buildId, sessionId });
 
       await sessionManager.updateSessionContext(sessionId, {
         buildId,
@@ -356,16 +513,16 @@ export function initializeModificationRoutes(
         const context = await conversationHelper.getEnhancedContext(sessionId);
         if (context) {
           enhancedPrompt = `${context}\n\n--- CURRENT REQUEST ---\n${prompt}`;
-          sendEvent('progress', { step: 4, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
+          sendEvent('progress', { step: 5, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
         }
       } catch {
-        sendEvent('progress', { step: 4, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
+        sendEvent('progress', { step: 5, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
       }
 
       const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
       fileModifier.setStreamCallback((message) => sendEvent('progress', { step: 7, total: 16, message, buildId, sessionId }));
 
-      sendEvent('progress', { step: 5, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
+      sendEvent('progress', { step: 6, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
 
       const startTime = Date.now();
 
@@ -490,7 +647,7 @@ export function initializeModificationRoutes(
           sendEvent('complete', {
             success: true,
             data: {
-              workflow: "enhanced-url-manager-modification",
+              workflow: "url-based-project-resolution",
               approach: result.approach || 'UNKNOWN',
               selectedFiles: result.selectedFiles || [],
               addedFiles: result.addedFiles || [],
@@ -507,9 +664,11 @@ export function initializeModificationRoutes(
               sessionId,
               userId,
               projectId: urlResult.projectId || currentProjectId,
+              projectName: userProject?.name,
               projectAction: urlResult.action,
+              projectMatchReason: matchReason,
               skipReason: urlResult.skipReason,
-              duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
+              duplicatePrevention: "URL-based project resolution with comprehensive duplicate checking",
               hosting: "Azure Static Web Apps",
               features: [
                 "Global CDN",
@@ -530,13 +689,15 @@ export function initializeModificationRoutes(
           sendEvent('complete', {
             success: true,
             data: {
-              workflow: "enhanced-url-manager-modification-build-error",
+              workflow: "url-based-project-resolution-build-error",
               approach: result.approach || 'UNKNOWN',
               buildError: buildError instanceof Error ? buildError.message : 'Build failed',
               buildId,
               sessionId,
               userId,
               projectId: currentProjectId,
+              projectName: userProject?.name,
+              projectMatchReason: matchReason,
               message: "Modification completed, but build/deploy failed"
             }
           });
@@ -551,7 +712,9 @@ export function initializeModificationRoutes(
           buildId,
           sessionId,
           userId,
-          projectId: currentProjectId
+          projectId: currentProjectId,
+          projectName: userProject?.name,
+          projectMatchReason: matchReason
         });
 
         clearTimeout(cleanupTimer);
@@ -577,13 +740,15 @@ export function initializeModificationRoutes(
     }
   });
 
-  // NON-STREAMING MODIFICATION ENDPOINT
+  // NON-STREAMING MODIFICATION ENDPOINT WITH URL-BASED RESOLUTION
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     try {
       const { 
         prompt, 
         sessionId: clientSessionId,
-        userId: providedUserId
+        userId: providedUserId,
+        currentUrl,    // NEW: Current page URL
+        deployedUrl    // NEW: Deployed app URL
       } = req.body;
       
       if (!prompt) {
@@ -614,6 +779,8 @@ export function initializeModificationRoutes(
       }
 
       console.log(`[${buildId}] Starting non-streaming modification for user: ${userId}`);
+      console.log(`[${buildId}] Current URL: ${currentUrl || 'not provided'}`);
+      console.log(`[${buildId}] Deployed URL: ${deployedUrl || 'not provided'}`);
 
       const cleanupTimer = setTimeout(() => {
         cleanupTempDirectory(buildId);
@@ -621,13 +788,24 @@ export function initializeModificationRoutes(
       }, 5 * 60 * 1000);
 
       try {
-        // RESOLVE CURRENT PROJECT ID FOR UPDATING
-        const { projectId: currentProjectId, project: currentProject } = await resolveCurrentProject(
+        // ENHANCED PROJECT RESOLUTION BY DEPLOYED URL
+        const { projectId: currentProjectId, project: currentProject, matchReason } = await resolveProjectByDeployedUrl(
           messageDB, 
           urlManager, 
           userId, 
+          deployedUrl || currentUrl,
           sessionId
         );
+
+        console.log(`[${buildId}] Project resolution result: ${matchReason}`);
+        console.log(`[${buildId}] Target URL: ${deployedUrl || currentUrl || 'none provided'}`);
+
+        if (currentProjectId) {
+          console.log(`[${buildId}] ✅ Selected project: "${currentProject.name}" (ID: ${currentProjectId})`);
+          console.log(`[${buildId}] Project URL: ${currentProject.deploymentUrl}`);
+        } else {
+          console.log(`[${buildId}] ⚠️ No existing project matched, will create new one`);
+        }
 
         // Enhanced project resolution using URL manager
         let sessionContext = await sessionManager.getSessionContext(sessionId);
@@ -877,7 +1055,7 @@ export function initializeModificationRoutes(
             res.json({
               success: true,
               data: {
-                workflow: "enhanced-url-manager-modification",
+                workflow: "url-based-project-resolution",
                 approach: result.approach || 'UNKNOWN',
                 selectedFiles: result.selectedFiles || [],
                 addedFiles: result.addedFiles || [],
@@ -894,9 +1072,11 @@ export function initializeModificationRoutes(
                 sessionId: sessionId,
                 userId: userId,
                 projectId: urlResult.projectId || currentProjectId,
+                projectName: targetProject?.name,
                 projectAction: urlResult.action,
+                projectMatchReason: matchReason,
                 skipReason: urlResult.skipReason,
-                duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
+                duplicatePrevention: "URL-based project resolution with comprehensive duplicate checking",
                 hosting: "Azure Static Web Apps",
                 features: [
                   "Global CDN",
@@ -919,7 +1099,7 @@ export function initializeModificationRoutes(
             res.json({
               success: true,
               data: {
-                workflow: "enhanced-url-manager-modification-build-error",
+                workflow: "url-based-project-resolution-build-error",
                 approach: result.approach || 'UNKNOWN',
                 selectedFiles: result.selectedFiles || [],
                 addedFiles: result.addedFiles || [],
@@ -929,6 +1109,8 @@ export function initializeModificationRoutes(
                 sessionId: sessionId,
                 userId: userId,
                 projectId: currentProjectId,
+                projectName: targetProject?.name,
+                projectMatchReason: matchReason,
                 message: "Modification completed successfully, but build/deploy failed",
                 projectState: currentProjectId ? 'existing_project_modified' : 'new_project_created',
                 tempBuildDirPath: tempBuildDir
@@ -961,11 +1143,13 @@ export function initializeModificationRoutes(
             approach: result.approach,
             reasoning: result.reasoning,
             selectedFiles: result.selectedFiles || [],
-            workflow: "enhanced-url-manager-modification",
+            workflow: "url-based-project-resolution",
             buildId: buildId,
             sessionId: sessionId,
             userId: userId,
             projectId: currentProjectId,
+            projectName: targetProject?.name,
+            projectMatchReason: matchReason,
             projectState: currentProjectId ? 'existing_project_failed' : 'new_project_failed',
             tempBuildDirPath: tempBuildDir
           });
@@ -980,7 +1164,7 @@ export function initializeModificationRoutes(
           success: false,
           error: 'Failed to setup project environment',
           details: downloadError instanceof Error ? downloadError.message : 'Unknown error',
-          workflow: "enhanced-url-manager-modification",
+          workflow: "url-based-project-resolution",
           buildId: buildId,
           sessionId: sessionId,
           userId: userId
@@ -995,7 +1179,7 @@ export function initializeModificationRoutes(
         success: false,
         error: 'Internal server error during modification',
         details: error.message,
-        workflow: "enhanced-url-manager-modification",
+        workflow: "url-based-project-resolution",
         buildId: buildId,
         sessionId: sessionId,
         userId: req.body.userId || 'unresolved'
@@ -1046,7 +1230,7 @@ export function initializeModificationRoutes(
         userId: resolvedUserId,
         totalProjects: projects.length,
         stats: stats,
-        duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking"
+        duplicatePrevention: "URL-based project resolution with comprehensive duplicate checking"
       });
     } catch (error) {
       res.status(500).json({
@@ -1081,6 +1265,48 @@ export function initializeModificationRoutes(
       res.status(500).json({
         success: false,
         error: 'Failed to get project URLs',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  });
+
+  // NEW: ENDPOINT TO VERIFY URL-PROJECT MAPPING
+  router.get("/verify-url/:userId", async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { userId: paramUserId } = req.params;
+      const { url } = req.query;
+      const userId = parseInt(paramUserId);
+
+      if (isNaN(userId) || !url) {
+        res.status(400).json({
+          success: false,
+          error: 'Invalid user ID or missing URL'
+        });
+        return;
+      }
+
+      const resolvedUserId = await resolveUserId(messageDB, userId);
+      const project = await findProjectByUrl(messageDB, resolvedUserId, url as string);
+
+      res.json({
+        success: true,
+        data: {
+          hasMatch: !!project,
+          project: project ? {
+            id: project.id,
+            name: project.name,
+            description: project.description,
+            deploymentUrl: project.deploymentUrl,
+            framework: project.framework
+          } : null,
+          normalizedUrl: normalizeUrl(url as string),
+          searchUrl: url as string
+        }
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to verify URL-project mapping',
         details: error instanceof Error ? error.message : 'Unknown error'
       });
     }

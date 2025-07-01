@@ -46,7 +46,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeModificationRoutes = initializeModificationRoutes;
-// routes/modification.ts - Updated with Enhanced URL Manager and improved duplicate prevention
+// routes/modification.ts - Complete Updated with Enhanced URL Manager and URL-based project resolution
 const express_1 = __importDefault(require("express"));
 const filemodifier_1 = require("../services/filemodifier");
 const url_manager_1 = require("../db/url-manager");
@@ -119,6 +119,99 @@ class StatelessConversationHelper {
         });
     }
 }
+// URL normalization for reliable matching
+function normalizeUrl(url) {
+    if (!url)
+        return '';
+    try {
+        // Remove protocol, www, trailing slashes, and query params for comparison
+        let normalized = url.toLowerCase()
+            .replace(/^https?:\/\//, '')
+            .replace(/^www\./, '')
+            .replace(/\/$/, '')
+            .split('?')[0]
+            .split('#')[0];
+        return normalized;
+    }
+    catch (error) {
+        console.error('Error normalizing URL:', url, error);
+        return url.toLowerCase();
+    }
+}
+// Enhanced project resolution based on deployed URL
+function resolveProjectByDeployedUrl(messageDB, urlManager, userId, deployedUrl, sessionId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            // Get all user projects
+            const userProjects = yield messageDB.getUserProjects(userId);
+            if (userProjects.length === 0) {
+                return {
+                    projectId: null,
+                    project: null,
+                    matchReason: 'no_user_projects'
+                };
+            }
+            // Priority 1: Match by deployed URL (most reliable)
+            if (deployedUrl) {
+                console.log(`🔍 Looking for project with deployed URL: ${deployedUrl}`);
+                // Clean and normalize URLs for comparison
+                const normalizedTargetUrl = normalizeUrl(deployedUrl);
+                const urlMatch = userProjects.find(project => {
+                    if (!project.deploymentUrl)
+                        return false;
+                    const normalizedProjectUrl = normalizeUrl(project.deploymentUrl);
+                    const isMatch = normalizedProjectUrl === normalizedTargetUrl;
+                    if (isMatch) {
+                        console.log(`✅ URL match found: ${project.deploymentUrl} -> Project: ${project.name}`);
+                    }
+                    return isMatch;
+                });
+                if (urlMatch) {
+                    return {
+                        projectId: urlMatch.id,
+                        project: urlMatch,
+                        matchReason: 'deployed_url_match'
+                    };
+                }
+                else {
+                    console.log(`⚠️ No project found with deployed URL: ${deployedUrl}`);
+                    console.log('Available project URLs:');
+                    userProjects.forEach(p => {
+                        console.log(`  - ${p.name}: ${p.deploymentUrl || 'No URL'}`);
+                    });
+                }
+            }
+            // Priority 2: Try session-based matching as fallback
+            if (sessionId) {
+                const sessionProject = yield messageDB.getProjectBySessionId(sessionId);
+                if (sessionProject && userProjects.find(p => p.id === sessionProject.id)) {
+                    console.log(`✅ Fallback to session project: ${sessionProject.id} (${sessionProject.name})`);
+                    return {
+                        projectId: sessionProject.id,
+                        project: sessionProject,
+                        matchReason: 'session_fallback'
+                    };
+                }
+            }
+            // Priority 3: Use most recent project as last resort
+            const recentProject = userProjects[0];
+            console.log(`⚠️ No URL match found, using most recent project: ${recentProject.name}`);
+            return {
+                projectId: recentProject.id,
+                project: recentProject,
+                matchReason: 'recent_fallback'
+            };
+        }
+        catch (error) {
+            console.error('❌ Failed to resolve project by URL:', error);
+            return {
+                projectId: null,
+                project: null,
+                matchReason: 'resolution_error'
+            };
+        }
+    });
+}
 // FALLBACK USER RESOLUTION FUNCTION
 function resolveUserId(messageDB, providedUserId, sessionId) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -151,34 +244,6 @@ function resolveUserId(messageDB, providedUserId, sessionId) {
         catch (error) {
             console.error('❌ Failed to resolve user ID:', error);
             throw new Error('Could not resolve or create user');
-        }
-    });
-}
-// SIMPLIFIED PROJECT RESOLUTION - Gets current project ID for updates (NO EXPLICIT PROJECT ID)
-function resolveCurrentProject(messageDB, urlManager, userId, sessionId) {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            // Priority 1: Get user's most recent project
-            const userProjects = yield messageDB.getUserProjects(userId);
-            if (userProjects.length > 0) {
-                const recentProject = userProjects[0]; // Most recent project
-                console.log(`✅ Using user's most recent project: ${recentProject.id}`);
-                return { projectId: recentProject.id, project: recentProject };
-            }
-            // Priority 2: Check session for project
-            if (sessionId) {
-                const sessionProject = yield messageDB.getProjectBySessionId(sessionId);
-                if (sessionProject) {
-                    console.log(`✅ Using session project: ${sessionProject.id}`);
-                    return { projectId: sessionProject.id, project: sessionProject };
-                }
-            }
-            console.log(`⚠️ No current project found for user ${userId}`);
-            return { projectId: null, project: null };
-        }
-        catch (error) {
-            console.error('❌ Failed to resolve current project:', error);
-            return { projectId: null, project: null };
         }
     });
 }
@@ -223,14 +288,35 @@ function cleanupTempDirectory(buildId) {
         }
     });
 }
+// Database helper to find project by URL
+function findProjectByUrl(messageDB, userId, searchUrl) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const userProjects = yield messageDB.getUserProjects(userId);
+            const normalizedSearchUrl = normalizeUrl(searchUrl);
+            const match = userProjects.find(project => {
+                if (!project.deploymentUrl)
+                    return false;
+                return normalizeUrl(project.deploymentUrl) === normalizedSearchUrl;
+            });
+            return match || null;
+        }
+        catch (error) {
+            console.error('Error finding project by URL:', error);
+            return null;
+        }
+    });
+}
 // Initialize routes with dependencies
 function initializeModificationRoutes(anthropic, messageDB, redis, sessionManager) {
     const conversationHelper = new StatelessConversationHelper(messageDB, redis);
     const urlManager = new url_manager_1.EnhancedProjectUrlManager(messageDB);
-    // STATELESS STREAMING MODIFICATION ENDPOINT
+    // STATELESS STREAMING MODIFICATION ENDPOINT WITH URL-BASED RESOLUTION
     router.post("/stream", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e;
-        const { prompt, sessionId: clientSessionId, userId: providedUserId } = req.body;
+        const { prompt, sessionId: clientSessionId, userId: providedUserId, currentUrl, // NEW: Current page URL
+        deployedUrl // NEW: Deployed app URL
+         } = req.body;
         if (!prompt) {
             res.status(400).json({
                 success: false,
@@ -257,6 +343,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             return;
         }
         console.log(`[${buildId}] Starting modification for user: ${userId}, session: ${sessionId}`);
+        console.log(`[${buildId}] Current URL: ${currentUrl || 'not provided'}`);
+        console.log(`[${buildId}] Deployed URL: ${deployedUrl || 'not provided'}`);
         console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
@@ -276,14 +364,70 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
         }, 5 * 60 * 1000);
         try {
             sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
-            // RESOLVE CURRENT PROJECT ID FOR UPDATING
-            const { projectId: currentProjectId, project: currentProject } = yield resolveCurrentProject(messageDB, urlManager, userId, sessionId);
+            // ENHANCED PROJECT RESOLUTION BY DEPLOYED URL
+            const { projectId: currentProjectId, project: currentProject, matchReason } = yield resolveProjectByDeployedUrl(messageDB, urlManager, userId, deployedUrl || currentUrl, sessionId);
+            console.log(`[${buildId}] Project resolution result: ${matchReason}`);
+            console.log(`[${buildId}] Target URL: ${deployedUrl || currentUrl || 'none provided'}`);
+            if (currentProjectId) {
+                console.log(`[${buildId}] ✅ Selected project: "${currentProject.name}" (ID: ${currentProjectId})`);
+                console.log(`[${buildId}] Project URL: ${currentProject.deploymentUrl}`);
+            }
+            else {
+                console.log(`[${buildId}] ⚠️ No existing project matched, will create new one`);
+            }
+            // Enhanced progress messaging based on match reason
+            if (matchReason === 'deployed_url_match') {
+                sendEvent('progress', {
+                    step: 2,
+                    total: 16,
+                    message: `✅ Found project: "${currentProject.name}" (URL match)`,
+                    buildId,
+                    sessionId,
+                    projectId: currentProjectId,
+                    projectName: currentProject.name,
+                    matchReason
+                });
+            }
+            else if (matchReason === 'session_fallback') {
+                sendEvent('progress', {
+                    step: 2,
+                    total: 16,
+                    message: `📋 Using session project: "${currentProject.name}"`,
+                    buildId,
+                    sessionId,
+                    projectId: currentProjectId,
+                    projectName: currentProject.name,
+                    matchReason
+                });
+            }
+            else if (matchReason === 'recent_fallback') {
+                sendEvent('progress', {
+                    step: 2,
+                    total: 16,
+                    message: `⚠️ No URL match. Using recent: "${currentProject.name}"`,
+                    buildId,
+                    sessionId,
+                    projectId: currentProjectId,
+                    projectName: currentProject.name,
+                    matchReason
+                });
+            }
+            else {
+                sendEvent('progress', {
+                    step: 2,
+                    total: 16,
+                    message: 'No existing project found. Starting fresh...',
+                    buildId,
+                    sessionId,
+                    matchReason
+                });
+            }
             let sessionContext = yield sessionManager.getSessionContext(sessionId);
             let tempBuildDir = '';
             let userProject = currentProject;
             // Enhanced project resolution using URL manager
             if (currentProjectId) {
-                sendEvent('progress', { step: 2, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
+                sendEvent('progress', { step: 3, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
                 const projectUrls = yield urlManager.getProjectUrls({ projectId: currentProjectId });
                 if (projectUrls && projectUrls.zipUrl) {
                     tempBuildDir = yield downloadAndExtractProject(buildId, projectUrls.zipUrl);
@@ -302,7 +446,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             }
             else {
                 // Fallback logic
-                sendEvent('progress', { step: 2, total: 16, message: 'No current project found. Checking Redis...', buildId, sessionId });
+                sendEvent('progress', { step: 3, total: 16, message: 'No current project found. Checking Redis...', buildId, sessionId });
                 sessionContext = yield sessionManager.getSessionContext(sessionId);
                 if ((_a = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _a === void 0 ? void 0 : _a.zipUrl) {
                     tempBuildDir = yield downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
@@ -337,7 +481,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     }
                 }
             }
-            sendEvent('progress', { step: 3, total: 16, message: 'Project environment ready!', buildId, sessionId });
+            sendEvent('progress', { step: 4, total: 16, message: 'Project environment ready!', buildId, sessionId });
             yield sessionManager.updateSessionContext(sessionId, {
                 buildId,
                 tempBuildDir,
@@ -348,15 +492,15 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 const context = yield conversationHelper.getEnhancedContext(sessionId);
                 if (context) {
                     enhancedPrompt = `${context}\n\n--- CURRENT REQUEST ---\n${prompt}`;
-                    sendEvent('progress', { step: 4, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
+                    sendEvent('progress', { step: 5, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
                 }
             }
             catch (_f) {
-                sendEvent('progress', { step: 4, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
+                sendEvent('progress', { step: 5, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
             }
             const fileModifier = new filemodifier_1.StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
             fileModifier.setStreamCallback((message) => sendEvent('progress', { step: 7, total: 16, message, buildId, sessionId }));
-            sendEvent('progress', { step: 5, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
+            sendEvent('progress', { step: 6, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
             const startTime = Date.now();
             const result = yield fileModifier.processModification(enhancedPrompt, undefined, (_b = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _b === void 0 ? void 0 : _b.summary, (summary, prompt) => __awaiter(this, void 0, void 0, function* () {
                 try {
@@ -443,7 +587,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('complete', {
                         success: true,
                         data: {
-                            workflow: "enhanced-url-manager-modification",
+                            workflow: "url-based-project-resolution",
                             approach: result.approach || 'UNKNOWN',
                             selectedFiles: result.selectedFiles || [],
                             addedFiles: result.addedFiles || [],
@@ -460,9 +604,11 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                             sessionId,
                             userId,
                             projectId: urlResult.projectId || currentProjectId,
+                            projectName: userProject === null || userProject === void 0 ? void 0 : userProject.name,
                             projectAction: urlResult.action,
+                            projectMatchReason: matchReason,
                             skipReason: urlResult.skipReason,
-                            duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
+                            duplicatePrevention: "URL-based project resolution with comprehensive duplicate checking",
                             hosting: "Azure Static Web Apps",
                             features: [
                                 "Global CDN",
@@ -481,13 +627,15 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('complete', {
                         success: true,
                         data: {
-                            workflow: "enhanced-url-manager-modification-build-error",
+                            workflow: "url-based-project-resolution-build-error",
                             approach: result.approach || 'UNKNOWN',
                             buildError: buildError instanceof Error ? buildError.message : 'Build failed',
                             buildId,
                             sessionId,
                             userId,
                             projectId: currentProjectId,
+                            projectName: userProject === null || userProject === void 0 ? void 0 : userProject.name,
+                            projectMatchReason: matchReason,
                             message: "Modification completed, but build/deploy failed"
                         }
                     });
@@ -502,7 +650,9 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     buildId,
                     sessionId,
                     userId,
-                    projectId: currentProjectId
+                    projectId: currentProjectId,
+                    projectName: userProject === null || userProject === void 0 ? void 0 : userProject.name,
+                    projectMatchReason: matchReason
                 });
                 clearTimeout(cleanupTimer);
                 yield cleanupTempDirectory(buildId);
@@ -526,11 +676,13 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             res.end();
         }
     }));
-    // NON-STREAMING MODIFICATION ENDPOINT
+    // NON-STREAMING MODIFICATION ENDPOINT WITH URL-BASED RESOLUTION
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e;
         try {
-            const { prompt, sessionId: clientSessionId, userId: providedUserId } = req.body;
+            const { prompt, sessionId: clientSessionId, userId: providedUserId, currentUrl, // NEW: Current page URL
+            deployedUrl // NEW: Deployed app URL
+             } = req.body;
             if (!prompt) {
                 res.status(400).json({
                     success: false,
@@ -557,13 +709,24 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 return;
             }
             console.log(`[${buildId}] Starting non-streaming modification for user: ${userId}`);
+            console.log(`[${buildId}] Current URL: ${currentUrl || 'not provided'}`);
+            console.log(`[${buildId}] Deployed URL: ${deployedUrl || 'not provided'}`);
             const cleanupTimer = setTimeout(() => {
                 cleanupTempDirectory(buildId);
                 sessionManager.cleanup(sessionId);
             }, 5 * 60 * 1000);
             try {
-                // RESOLVE CURRENT PROJECT ID FOR UPDATING
-                const { projectId: currentProjectId, project: currentProject } = yield resolveCurrentProject(messageDB, urlManager, userId, sessionId);
+                // ENHANCED PROJECT RESOLUTION BY DEPLOYED URL
+                const { projectId: currentProjectId, project: currentProject, matchReason } = yield resolveProjectByDeployedUrl(messageDB, urlManager, userId, deployedUrl || currentUrl, sessionId);
+                console.log(`[${buildId}] Project resolution result: ${matchReason}`);
+                console.log(`[${buildId}] Target URL: ${deployedUrl || currentUrl || 'none provided'}`);
+                if (currentProjectId) {
+                    console.log(`[${buildId}] ✅ Selected project: "${currentProject.name}" (ID: ${currentProjectId})`);
+                    console.log(`[${buildId}] Project URL: ${currentProject.deploymentUrl}`);
+                }
+                else {
+                    console.log(`[${buildId}] ⚠️ No existing project matched, will create new one`);
+                }
                 // Enhanced project resolution using URL manager
                 let sessionContext = yield sessionManager.getSessionContext(sessionId);
                 let tempBuildDir = "";
@@ -772,7 +935,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         res.json({
                             success: true,
                             data: {
-                                workflow: "enhanced-url-manager-modification",
+                                workflow: "url-based-project-resolution",
                                 approach: result.approach || 'UNKNOWN',
                                 selectedFiles: result.selectedFiles || [],
                                 addedFiles: result.addedFiles || [],
@@ -789,9 +952,11 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 sessionId: sessionId,
                                 userId: userId,
                                 projectId: urlResult.projectId || currentProjectId,
+                                projectName: targetProject === null || targetProject === void 0 ? void 0 : targetProject.name,
                                 projectAction: urlResult.action,
+                                projectMatchReason: matchReason,
                                 skipReason: urlResult.skipReason,
-                                duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
+                                duplicatePrevention: "URL-based project resolution with comprehensive duplicate checking",
                                 hosting: "Azure Static Web Apps",
                                 features: [
                                     "Global CDN",
@@ -812,7 +977,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         res.json({
                             success: true,
                             data: {
-                                workflow: "enhanced-url-manager-modification-build-error",
+                                workflow: "url-based-project-resolution-build-error",
                                 approach: result.approach || 'UNKNOWN',
                                 selectedFiles: result.selectedFiles || [],
                                 addedFiles: result.addedFiles || [],
@@ -822,6 +987,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 sessionId: sessionId,
                                 userId: userId,
                                 projectId: currentProjectId,
+                                projectName: targetProject === null || targetProject === void 0 ? void 0 : targetProject.name,
+                                projectMatchReason: matchReason,
                                 message: "Modification completed successfully, but build/deploy failed",
                                 projectState: currentProjectId ? 'existing_project_modified' : 'new_project_created',
                                 tempBuildDirPath: tempBuildDir
@@ -853,11 +1020,13 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         approach: result.approach,
                         reasoning: result.reasoning,
                         selectedFiles: result.selectedFiles || [],
-                        workflow: "enhanced-url-manager-modification",
+                        workflow: "url-based-project-resolution",
                         buildId: buildId,
                         sessionId: sessionId,
                         userId: userId,
                         projectId: currentProjectId,
+                        projectName: targetProject === null || targetProject === void 0 ? void 0 : targetProject.name,
+                        projectMatchReason: matchReason,
                         projectState: currentProjectId ? 'existing_project_failed' : 'new_project_failed',
                         tempBuildDirPath: tempBuildDir
                     });
@@ -871,7 +1040,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     success: false,
                     error: 'Failed to setup project environment',
                     details: downloadError instanceof Error ? downloadError.message : 'Unknown error',
-                    workflow: "enhanced-url-manager-modification",
+                    workflow: "url-based-project-resolution",
                     buildId: buildId,
                     sessionId: sessionId,
                     userId: userId
@@ -886,7 +1055,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 success: false,
                 error: 'Internal server error during modification',
                 details: error.message,
-                workflow: "enhanced-url-manager-modification",
+                workflow: "url-based-project-resolution",
                 buildId: buildId,
                 sessionId: sessionId,
                 userId: req.body.userId || 'unresolved'
@@ -932,7 +1101,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 userId: resolvedUserId,
                 totalProjects: projects.length,
                 stats: stats,
-                duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking"
+                duplicatePrevention: "URL-based project resolution with comprehensive duplicate checking"
             });
         }
         catch (error) {
@@ -966,6 +1135,45 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             res.status(500).json({
                 success: false,
                 error: 'Failed to get project URLs',
+                details: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }));
+    // NEW: ENDPOINT TO VERIFY URL-PROJECT MAPPING
+    router.get("/verify-url/:userId", (req, res) => __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { userId: paramUserId } = req.params;
+            const { url } = req.query;
+            const userId = parseInt(paramUserId);
+            if (isNaN(userId) || !url) {
+                res.status(400).json({
+                    success: false,
+                    error: 'Invalid user ID or missing URL'
+                });
+                return;
+            }
+            const resolvedUserId = yield resolveUserId(messageDB, userId);
+            const project = yield findProjectByUrl(messageDB, resolvedUserId, url);
+            res.json({
+                success: true,
+                data: {
+                    hasMatch: !!project,
+                    project: project ? {
+                        id: project.id,
+                        name: project.name,
+                        description: project.description,
+                        deploymentUrl: project.deploymentUrl,
+                        framework: project.framework
+                    } : null,
+                    normalizedUrl: normalizeUrl(url),
+                    searchUrl: url
+                }
+            });
+        }
+        catch (error) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to verify URL-project mapping',
                 details: error instanceof Error ? error.message : 'Unknown error'
             });
         }
