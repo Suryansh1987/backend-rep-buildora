@@ -1,4 +1,4 @@
-// routes/generation.ts - Complete file with enhanced URL management
+// routes/generation.ts - Fixed to prevent duplicate project creation
 import express, { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import AdmZip from "adm-zip";
@@ -69,6 +69,47 @@ async function cleanupTempDirectory(buildId: string): Promise<void> {
   }
 }
 
+// DYNAMIC USER RESOLUTION FUNCTION
+async function resolveUserId(
+  messageDB: DrizzleMessageHistoryDB,
+  providedUserId?: number,
+  sessionId?: string
+): Promise<number> {
+  try {
+    // Priority 1: Use provided userId if valid
+    if (providedUserId && await messageDB.validateUserExists(providedUserId)) {
+      return providedUserId;
+    }
+
+    // Priority 2: Get userId from session's most recent project
+    if (sessionId) {
+      const sessionProject = await messageDB.getProjectBySessionId(sessionId);
+      if (sessionProject && sessionProject.userId) {
+        return sessionProject.userId;
+      }
+    }
+
+    // Priority 3: Get most recent user from any project
+    const mostRecentUserId = await messageDB.getMostRecentUserId();
+    if (mostRecentUserId && await messageDB.validateUserExists(mostRecentUserId)) {
+      return mostRecentUserId;
+    }
+
+    // Priority 4: Create a new user with current timestamp
+    const newUserId = Date.now() % 1000000;
+    await messageDB.ensureUserExists(newUserId, {
+      email: `user${newUserId}@buildora.dev`,
+      name: `User ${newUserId}`
+    });
+    
+    console.log(`✅ Created new user ${newUserId} as fallback`);
+    return newUserId;
+  } catch (error) {
+    console.error('❌ Failed to resolve user ID:', error);
+    throw new Error('Could not resolve or create user');
+  }
+}
+
 export function initializeGenerationRoutes(
   anthropic: Anthropic,
   messageDB: DrizzleMessageHistoryDB,
@@ -78,15 +119,15 @@ export function initializeGenerationRoutes(
   // Initialize Enhanced Project URL Manager
   const projectUrlManager = new EnhancedProjectUrlManager(messageDB);
 
-  // MAIN GENERATION ENDPOINT - Creates new projects only
+  // MAIN GENERATION ENDPOINT - SINGLE PROJECT CREATION ONLY
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     const { 
       prompt, 
-      userId,          // User ID from authentication
-      projectName,     // Optional: Custom project name
-      framework,       // Optional: Framework (default: react)
-      template,        // Optional: Template (default: vite-react-ts)
-      description      // Optional: Project description
+      userId: providedUserId,
+      projectName,
+      framework,
+      template,
+      description
     } = req.body;
     
     if (!prompt) {
@@ -99,6 +140,22 @@ export function initializeGenerationRoutes(
 
     const buildId = uuidv4();
     const sessionId = sessionManager.generateSessionId();
+    
+    // Step 1: Resolve user ID ONLY (no project creation)
+    let userId: number;
+    try {
+      userId = await resolveUserId(messageDB, providedUserId, sessionId);
+      console.log(`[${buildId}] Resolved user ID: ${userId} (provided: ${providedUserId})`);
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to resolve user for project generation',
+        details: error instanceof Error ? error.message : 'Unknown error',
+        buildId,
+        sessionId
+      });
+      return;
+    }
     
     console.log(`[${buildId}] Starting new project generation pipeline`);
     console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}`);
@@ -259,7 +316,8 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
             success: false,
             error: 'Parse failure',
             buildId: buildId,
-            sessionId: sessionId
+            sessionId: sessionId,
+            userId: userId
           } as any
         );
 
@@ -270,6 +328,7 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
           rawResponse: accumulatedResponse.substring(0, 500) + '...',
           buildId: buildId,
           sessionId: sessionId,
+          userId: userId,
           databaseSaved: true,
           projectUrlsSaved: false
         });
@@ -435,25 +494,83 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
       console.log(`[${buildId}] 🚀 Deploying with Azure Static Web Apps...`);
       const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
-      // CREATE NEW PROJECT RECORD
-      console.log(`[${buildId}] 💾 Creating new project record...`);
+      // *** SINGLE PROJECT CREATION POINT - USE ONLY URL MANAGER ***
+      console.log(`[${buildId}] 💾 Creating project record using URL manager ONLY...`);
       
-      const urlResult = await projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
-        deploymentUrl: previewUrl as string,
-        downloadUrl: urls.downloadUrl,
-        zipUrl: zipUrl
-      }, {
-        projectId: undefined,                         // No existing project for new generation
-        userId: userId,                               // User ID from auth
-        isModification: false,                        // This is new generation
-        prompt: prompt,
-        name: projectName || undefined,
-        description: description || projectSummary,
-        framework: framework || 'react',
-        template: template || 'vite-react-ts'
-      });
-
-      console.log(`[${buildId}] ✅ New project created - Project ID: ${urlResult.projectId}`);
+      let urlResult: { projectId: number | null; action: 'created' | 'updated' | 'failed' } = { 
+        projectId: null, 
+        action: 'failed' 
+      };
+      let projectUrlsSaved = false;
+      
+      try {
+        const result = await projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
+          deploymentUrl: previewUrl as string,
+          downloadUrl: urls.downloadUrl,
+          zipUrl: zipUrl
+        }, {
+          projectId: undefined,                         // No existing project for new generation
+          userId: userId,                               // Resolved user ID
+          isModification: false,                        // This is new generation
+          prompt: prompt,
+          name: projectName,
+          description: description || projectSummary,
+          framework: framework || 'react',
+          template: template || 'vite-react-ts'
+        });
+        
+        urlResult = { 
+          projectId: result.projectId, 
+          action: result.action
+        };
+        projectUrlsSaved = true;
+        
+        console.log(`[${buildId}] ✅ Project ${result.action} - Project ID: ${result.projectId}`);
+        
+      } catch (projectError) {
+        console.error(`[${buildId}] ❌ Failed to save/update project URLs:`, projectError);
+        urlResult = { projectId: null, action: 'failed' };
+        
+        // Log the specific error for debugging
+        if (projectError instanceof Error) {
+          if (projectError.message.includes('foreign key constraint')) {
+            console.warn(`[${buildId}] Foreign key constraint violation - attempting to resolve user issue`);
+            
+            // Try to ensure user exists and retry once
+            try {
+              await messageDB.ensureUserExists(userId);
+              console.log(`[${buildId}] User ${userId} ensured, retrying project creation...`);
+              
+              const retryResult = await projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
+                deploymentUrl: previewUrl as string,
+                downloadUrl: urls.downloadUrl,
+                zipUrl: zipUrl
+              }, {
+                projectId: undefined,
+                userId: userId,
+                isModification: false,
+                prompt: prompt,
+                name: projectName,
+                description: description || projectSummary,
+                framework: framework || 'react',
+                template: template || 'vite-react-ts'
+              });
+              
+              urlResult = { 
+                projectId: retryResult.projectId, 
+                action: retryResult.action
+              };
+              projectUrlsSaved = true;
+              console.log(`[${buildId}] ✅ Retry successful - Project ${retryResult.action} - ID: ${retryResult.projectId}`);
+              
+            } catch (retryError) {
+              console.error(`[${buildId}] ❌ Retry also failed:`, retryError);
+            }
+          } else {
+            console.error(`[${buildId}] Database error:`, projectError.message);
+          }
+        }
+      }
 
       // Save project summary to database (for backwards compatibility)
       try {
@@ -461,7 +578,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           projectSummary, 
           prompt, 
           zipUrl, 
-          buildId
+          buildId,
+          userId
         );
         console.log(`[${buildId}] 💾 Saved project summary to database, ID: ${summaryId}`);
       } catch (summaryError) {
@@ -486,7 +604,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           downloadUrl: urls.downloadUrl,
           zipUrl: zipUrl,
           sessionId: sessionId,
-          projectId: urlResult.projectId
+          projectId: urlResult.projectId,
+          userId: userId
         };
 
         const assistantMessageId = await messageDB.addMessage(
@@ -508,7 +627,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
       console.log(`[${buildId}] ⏱️ Total generation completed in ${totalProcessingTime}ms`);
       console.log(`[${buildId}] 📊 Token usage: ${result.usage?.input_tokens || 0} input, ${result.usage?.output_tokens || 0} output`);
       
-      // SUCCESS RESPONSE
+      // SUCCESS RESPONSE - Project generation succeeded
       res.json({
         success: true,
         files: parsedFiles,
@@ -517,8 +636,9 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         zipUrl: zipUrl,
         buildId: buildId,
         sessionId: sessionId,
-        projectId: urlResult.projectId,               // Return created project ID
-        projectAction: 'created',                     // Always 'created' for new generation
+        userId: userId,
+        projectId: urlResult.projectId,
+        projectAction: urlResult.action,
         hosting: "Azure Static Web Apps",
         features: [
           "Global CDN",
@@ -534,10 +654,12 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           summary: projectSummary,
           generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`,
           databaseSaved: true,
-          projectUrlsSaved: true,
-          identificationStrategy: 'new_project_creation',
+          projectUrlsSaved: projectUrlsSaved,
+          identificationStrategy: 'single_url_manager_creation',
+          duplicatePrevention: 'url_manager_only',
           userProvided: {
-            userId: userId,
+            userId: providedUserId,
+            resolvedUserId: userId,
             projectName: projectName,
             framework: framework,
             template: template,
@@ -564,7 +686,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           error: errorMessage,
           processingTimeMs: 0,
           buildId: buildId,
-          sessionId: sessionId
+          sessionId: sessionId,
+          userId: userId
         };
 
         await messageDB.addMessage(
@@ -583,6 +706,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         details: errorMessage,
         buildId: buildId,
         sessionId: sessionId,
+        userId: userId,
         databaseSaved: true,
         projectUrlsSaved: false,
         projectId: null,

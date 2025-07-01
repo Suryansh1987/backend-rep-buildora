@@ -46,7 +46,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeGenerationRoutes = initializeGenerationRoutes;
-// routes/generation.ts - Complete file with enhanced URL management
+// routes/generation.ts - Fixed to prevent duplicate project creation
 const express_1 = __importDefault(require("express"));
 const uuid_1 = require("uuid");
 const adm_zip_1 = __importDefault(require("adm-zip"));
@@ -119,18 +119,48 @@ function cleanupTempDirectory(buildId) {
         }
     });
 }
+// DYNAMIC USER RESOLUTION FUNCTION
+function resolveUserId(messageDB, providedUserId, sessionId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            // Priority 1: Use provided userId if valid
+            if (providedUserId && (yield messageDB.validateUserExists(providedUserId))) {
+                return providedUserId;
+            }
+            // Priority 2: Get userId from session's most recent project
+            if (sessionId) {
+                const sessionProject = yield messageDB.getProjectBySessionId(sessionId);
+                if (sessionProject && sessionProject.userId) {
+                    return sessionProject.userId;
+                }
+            }
+            // Priority 3: Get most recent user from any project
+            const mostRecentUserId = yield messageDB.getMostRecentUserId();
+            if (mostRecentUserId && (yield messageDB.validateUserExists(mostRecentUserId))) {
+                return mostRecentUserId;
+            }
+            // Priority 4: Create a new user with current timestamp
+            const newUserId = Date.now() % 1000000;
+            yield messageDB.ensureUserExists(newUserId, {
+                email: `user${newUserId}@buildora.dev`,
+                name: `User ${newUserId}`
+            });
+            console.log(`✅ Created new user ${newUserId} as fallback`);
+            return newUserId;
+        }
+        catch (error) {
+            console.error('❌ Failed to resolve user ID:', error);
+            throw new Error('Could not resolve or create user');
+        }
+    });
+}
 function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
     // Initialize Enhanced Project URL Manager
     const projectUrlManager = new url_manager_1.EnhancedProjectUrlManager(messageDB);
-    // MAIN GENERATION ENDPOINT - Creates new projects only
+    // MAIN GENERATION ENDPOINT - SINGLE PROJECT CREATION ONLY
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b;
-        const { prompt, userId, // User ID from authentication
-        projectName, // Optional: Custom project name
-        framework, // Optional: Framework (default: react)
-        template, // Optional: Template (default: vite-react-ts)
-        description // Optional: Project description
-         } = req.body;
+        const { prompt, userId: providedUserId, projectName, framework, template, description } = req.body;
         if (!prompt) {
             res.status(400).json({
                 success: false,
@@ -140,6 +170,22 @@ function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
         }
         const buildId = (0, uuid_1.v4)();
         const sessionId = sessionManager.generateSessionId();
+        // Step 1: Resolve user ID ONLY (no project creation)
+        let userId;
+        try {
+            userId = yield resolveUserId(messageDB, providedUserId, sessionId);
+            console.log(`[${buildId}] Resolved user ID: ${userId} (provided: ${providedUserId})`);
+        }
+        catch (error) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to resolve user for project generation',
+                details: error instanceof Error ? error.message : 'Unknown error',
+                buildId,
+                sessionId
+            });
+            return;
+        }
         console.log(`[${buildId}] Starting new project generation pipeline`);
         console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}`);
         console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
@@ -273,7 +319,8 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
                     success: false,
                     error: 'Parse failure',
                     buildId: buildId,
-                    sessionId: sessionId
+                    sessionId: sessionId,
+                    userId: userId
                 });
                 res.status(400).json({
                     success: false,
@@ -282,6 +329,7 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
                     rawResponse: accumulatedResponse.substring(0, 500) + '...',
                     buildId: buildId,
                     sessionId: sessionId,
+                    userId: userId,
                     databaseSaved: true,
                     projectUrlsSaved: false
                 });
@@ -418,26 +466,79 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
             // Deploy using the new deployment method
             console.log(`[${buildId}] 🚀 Deploying with Azure Static Web Apps...`);
             const previewUrl = yield (0, azure_deploy_1.runBuildAndDeploy)(builtZipUrl, buildId);
-            // CREATE NEW PROJECT RECORD
-            console.log(`[${buildId}] 💾 Creating new project record...`);
-            const urlResult = yield projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
-                deploymentUrl: previewUrl,
-                downloadUrl: urls.downloadUrl,
-                zipUrl: zipUrl
-            }, {
-                projectId: undefined, // No existing project for new generation
-                userId: userId, // User ID from auth
-                isModification: false, // This is new generation
-                prompt: prompt,
-                name: projectName || undefined,
-                description: description || projectSummary,
-                framework: framework || 'react',
-                template: template || 'vite-react-ts'
-            });
-            console.log(`[${buildId}] ✅ New project created - Project ID: ${urlResult.projectId}`);
+            // *** SINGLE PROJECT CREATION POINT - USE ONLY URL MANAGER ***
+            console.log(`[${buildId}] 💾 Creating project record using URL manager ONLY...`);
+            let urlResult = {
+                projectId: null,
+                action: 'failed'
+            };
+            let projectUrlsSaved = false;
+            try {
+                const result = yield projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
+                    deploymentUrl: previewUrl,
+                    downloadUrl: urls.downloadUrl,
+                    zipUrl: zipUrl
+                }, {
+                    projectId: undefined, // No existing project for new generation
+                    userId: userId, // Resolved user ID
+                    isModification: false, // This is new generation
+                    prompt: prompt,
+                    name: projectName,
+                    description: description || projectSummary,
+                    framework: framework || 'react',
+                    template: template || 'vite-react-ts'
+                });
+                urlResult = {
+                    projectId: result.projectId,
+                    action: result.action
+                };
+                projectUrlsSaved = true;
+                console.log(`[${buildId}] ✅ Project ${result.action} - Project ID: ${result.projectId}`);
+            }
+            catch (projectError) {
+                console.error(`[${buildId}] ❌ Failed to save/update project URLs:`, projectError);
+                urlResult = { projectId: null, action: 'failed' };
+                // Log the specific error for debugging
+                if (projectError instanceof Error) {
+                    if (projectError.message.includes('foreign key constraint')) {
+                        console.warn(`[${buildId}] Foreign key constraint violation - attempting to resolve user issue`);
+                        // Try to ensure user exists and retry once
+                        try {
+                            yield messageDB.ensureUserExists(userId);
+                            console.log(`[${buildId}] User ${userId} ensured, retrying project creation...`);
+                            const retryResult = yield projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
+                                deploymentUrl: previewUrl,
+                                downloadUrl: urls.downloadUrl,
+                                zipUrl: zipUrl
+                            }, {
+                                projectId: undefined,
+                                userId: userId,
+                                isModification: false,
+                                prompt: prompt,
+                                name: projectName,
+                                description: description || projectSummary,
+                                framework: framework || 'react',
+                                template: template || 'vite-react-ts'
+                            });
+                            urlResult = {
+                                projectId: retryResult.projectId,
+                                action: retryResult.action
+                            };
+                            projectUrlsSaved = true;
+                            console.log(`[${buildId}] ✅ Retry successful - Project ${retryResult.action} - ID: ${retryResult.projectId}`);
+                        }
+                        catch (retryError) {
+                            console.error(`[${buildId}] ❌ Retry also failed:`, retryError);
+                        }
+                    }
+                    else {
+                        console.error(`[${buildId}] Database error:`, projectError.message);
+                    }
+                }
+            }
             // Save project summary to database (for backwards compatibility)
             try {
-                const summaryId = yield messageDB.saveProjectSummary(projectSummary, prompt, zipUrl, buildId);
+                const summaryId = yield messageDB.saveProjectSummary(projectSummary, prompt, zipUrl, buildId, userId);
                 console.log(`[${buildId}] 💾 Saved project summary to database, ID: ${summaryId}`);
             }
             catch (summaryError) {
@@ -461,7 +562,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                     downloadUrl: urls.downloadUrl,
                     zipUrl: zipUrl,
                     sessionId: sessionId,
-                    projectId: urlResult.projectId
+                    projectId: urlResult.projectId,
+                    userId: userId
                 };
                 const assistantMessageId = yield messageDB.addMessage(`Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => f.path).join('\n')}`, 'assistant', assistantMetadata);
                 console.log(`[${buildId}] 💾 Saved assistant response (ID: ${assistantMessageId})`);
@@ -476,7 +578,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
             const totalProcessingTime = Date.now() - startTime;
             console.log(`[${buildId}] ⏱️ Total generation completed in ${totalProcessingTime}ms`);
             console.log(`[${buildId}] 📊 Token usage: ${((_a = result.usage) === null || _a === void 0 ? void 0 : _a.input_tokens) || 0} input, ${((_b = result.usage) === null || _b === void 0 ? void 0 : _b.output_tokens) || 0} output`);
-            // SUCCESS RESPONSE
+            // SUCCESS RESPONSE - Project generation succeeded
             res.json({
                 success: true,
                 files: parsedFiles,
@@ -485,8 +587,9 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                 zipUrl: zipUrl,
                 buildId: buildId,
                 sessionId: sessionId,
-                projectId: urlResult.projectId, // Return created project ID
-                projectAction: 'created', // Always 'created' for new generation
+                userId: userId,
+                projectId: urlResult.projectId,
+                projectAction: urlResult.action,
                 hosting: "Azure Static Web Apps",
                 features: [
                     "Global CDN",
@@ -502,10 +605,12 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                     summary: projectSummary,
                     generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`,
                     databaseSaved: true,
-                    projectUrlsSaved: true,
-                    identificationStrategy: 'new_project_creation',
+                    projectUrlsSaved: projectUrlsSaved,
+                    identificationStrategy: 'single_url_manager_creation',
+                    duplicatePrevention: 'url_manager_only',
                     userProvided: {
-                        userId: userId,
+                        userId: providedUserId,
+                        resolvedUserId: userId,
                         projectName: projectName,
                         framework: framework,
                         template: template,
@@ -529,7 +634,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                     error: errorMessage,
                     processingTimeMs: 0,
                     buildId: buildId,
-                    sessionId: sessionId
+                    sessionId: sessionId,
+                    userId: userId
                 };
                 yield messageDB.addMessage(`Frontend generation and build failed: ${errorMessage}`, 'assistant', errorMetadata);
             }
@@ -543,6 +649,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                 details: errorMessage,
                 buildId: buildId,
                 sessionId: sessionId,
+                userId: userId,
                 databaseSaved: true,
                 projectUrlsSaved: false,
                 projectId: null,

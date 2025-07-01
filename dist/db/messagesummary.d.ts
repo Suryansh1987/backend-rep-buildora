@@ -1,6 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { type CIMessage as Message, type MessageSummary, type ConversationStats, type ProjectSummary } from './message_schema';
-import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 interface ModificationResult {
     success: boolean;
     selectedFiles?: string[];
@@ -39,6 +38,13 @@ export declare class DrizzleMessageHistoryDB {
     private anthropic;
     private defaultSessionId;
     constructor(databaseUrl: string, anthropic: Anthropic);
+    validateUserExists(userId: number): Promise<boolean>;
+    ensureUserExists(userId: number, userData?: {
+        clerkId?: string;
+        email?: string;
+        name?: string;
+    }): Promise<number>;
+    getMostRecentUserId(): Promise<number | null>;
     getRecentProjects(limit?: number): Promise<any[]>;
     getUserProjects(userId: number): Promise<any[]>;
     getAllProjectsWithUrls(): Promise<any[]>;
@@ -74,7 +80,7 @@ export declare class DrizzleMessageHistoryDB {
     updateProjectStatus(projectId: number, status: string): Promise<void>;
     linkSessionToProject(sessionId: string, projectId: number): Promise<void>;
     incrementProjectMessageCount(sessionId: string): Promise<void>;
-    saveProjectSummary(summary: string, prompt: string, zipUrl?: string, buildId?: string): Promise<string | null>;
+    saveProjectSummary(summary: string, prompt: string, zipUrl?: string, buildId?: string, userId?: number): Promise<string | null>;
     /**
      * Update existing project summary with new ZIP URL and buildId
      */
@@ -105,7 +111,7 @@ export declare class DrizzleMessageHistoryDB {
      */
     deleteProjectSummary(id: string): Promise<boolean>;
     initializeStats(): Promise<void>;
-    addMessage(content: string, messageType: 'user' | 'assistant', metadata?: {
+    addMessage(content: string, messageType: 'user' | 'assistant' | 'system', metadata?: {
         fileModifications?: string[];
         modificationApproach?: 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION' | 'FULL_FILE_GENERATION' | null;
         modificationSuccess?: boolean;
@@ -125,6 +131,7 @@ export declare class DrizzleMessageHistoryDB {
         downloadUrl?: string;
         zipUrl?: string;
         sessionId?: string;
+        userId?: number;
     }): Promise<string>;
     /**
      * Save modification details for future context
@@ -174,40 +181,5 @@ export declare class DrizzleMessageHistoryDB {
      * Get project sessions (new method)
      */
     getProjectSessions(projectId: number): Promise<any[]>;
-}
-export declare class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFileModifier {
-    protected messageDB: DrizzleMessageHistoryDB;
-    constructor(anthropic: Anthropic, reactBasePath: string, databaseUrl: string, sessionId: string, redisUrl?: string);
-    initialize(): Promise<void>;
-    processModificationWithHistory(prompt: string): Promise<ModificationResult>;
-    getMessageDB(): DrizzleMessageHistoryDB;
-    getConversationData(): Promise<{
-        messages: Message[];
-        summaryCount: number;
-        totalMessages: number;
-        modificationStats: any;
-    }>;
-    getStats(): Promise<ConversationStats | null>;
-}
-export declare class ConversationHelper {
-    private messageDB;
-    constructor(databaseUrl: string, anthropic: Anthropic);
-    initialize(): Promise<void>;
-    getEnhancedContext(): Promise<string>;
-    saveModification(modification: ModificationRecord): Promise<void>;
-    getConversation(): Promise<{
-        messages: Message[];
-        summaryCount: number;
-        totalMessages: number;
-    }>;
-    getModificationStats(): Promise<any>;
-    getProjectSummary(): Promise<string | null>;
-    saveProjectSummary(summary: string, prompt: string, zipUrl?: string, buildId?: string): Promise<string | null>;
-    updateProjectSummary(summaryId: string, zipUrl: string, buildId: string): Promise<boolean>;
-    getConversationWithSummary(): Promise<{
-        messages: any[];
-        summaryCount: number;
-        totalMessages: number;
-    }>;
 }
 export {};

@@ -1,10 +1,11 @@
-// db/Messagesummary.ts - Updated to use separate component integrator schema with ZIP URL support
+// db/Messagesummary.ts - Updated with dynamic user handling and proper fallback mechanisms
 import { drizzle } from 'drizzle-orm/neon-http';
 import { neon } from '@neondatabase/serverless';
 import { eq, desc, sql, and, like } from 'drizzle-orm';
 import Anthropic from '@anthropic-ai/sdk';
 import { 
-  projects
+  projects,
+  users  // Import users table
 } from './project_schema';
 // Import component integrator specific schema
 import {
@@ -72,235 +73,325 @@ export class DrizzleMessageHistoryDB {
     this.anthropic = anthropic;
   }
 
-  // Add these methods to your DrizzleMessageHistoryDB class
+  // NEW: Validate if user exists in database
+  async validateUserExists(userId: number): Promise<boolean> {
+    try {
+      const user = await this.db
+        .select()
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
 
-
-// Add these methods to your DrizzleMessageHistoryDB class in db/Messagesummary.ts
-
-// Method to get recent projects (needed for fallback identification)
-async getRecentProjects(limit: number = 10): Promise<any[]> {
-  try {
-    return await this.db
-      .select()
-      .from(projects)
-      .orderBy(desc(projects.updatedAt))
-      .limit(limit);
-  } catch (error) {
-    console.error('Error getting recent projects:', error);
-    return [];
+      return user.length > 0;
+    } catch (error) {
+      console.error(`Error validating user ${userId}:`, error);
+      return false;
+    }
   }
-}
 
-// Enhanced getUserProjects method (already exists but making sure it's correct)
-async getUserProjects(userId: number): Promise<any[]> {
-  try {
-    return await this.db
-      .select()
-      .from(projects)
-      .where(eq(projects.userId, userId))
-      .orderBy(desc(projects.updatedAt));
-  } catch (error) {
-    console.error('Error getting user projects:', error);
-    return [];
-  }
-}
+  // NEW: Create user if they don't exist (for external auth systems like Clerk)
+  async ensureUserExists(userId: number, userData?: {
+    clerkId?: string;
+    email?: string;
+    name?: string;
+  }): Promise<number> {
+    try {
+      // Check if user exists
+      const userExists = await this.validateUserExists(userId);
+      
+      if (userExists) {
+        return userId;
+      }
 
-// Method to get all projects with their deployment URLs
-async getAllProjectsWithUrls(): Promise<any[]> {
-  try {
-    return await this.db
-      .select()
-      .from(projects)
-      .where(and(
-        eq(projects.status, 'ready'),
-        sql`${projects.deploymentUrl} IS NOT NULL`
-      ))
-      .orderBy(desc(projects.updatedAt));
-  } catch (error) {
-    console.error('Error getting projects with URLs:', error);
-    return [];
-  }
-}
-
-
-async getProjectBySessionId(sessionId: string): Promise<any> {
-  try {
-    const result = await this.db
-      .select()
-      .from(projects)
-      .where(eq(projects.lastSessionId, sessionId))
-      .orderBy(desc(projects.updatedAt))
-      .limit(1);
-    
-    return result[0] || null;
-  } catch (error) {
-    console.error('Error getting project by session ID:', error);
-    return null;
-  }
-}
-
-// Method to get project by build ID
-async getProjectByBuildId(buildId: string): Promise<any> {
-  try {
-    const result = await this.db
-      .select()
-      .from(projects)
-      .where(eq(projects.buildId, buildId))
-      .orderBy(desc(projects.updatedAt))
-      .limit(1);
-    
-    return result[0] || null;
-  } catch (error) {
-    console.error('Error getting project by build ID:', error);
-    return null;
-  }
-}
-
-// Method to update project URLs
-async updateProjectUrls(projectId: number, updateData: {
-  deploymentUrl: string;
-  downloadUrl: string;
-  zipUrl: string;
-  buildId: string;
-  status: string;
-  lastSessionId: string;
-  lastMessageAt: Date;
-  updatedAt: Date;
-}): Promise<void> {
-  try {
-    await this.db
-      .update(projects)
-      .set(updateData)
-      .where(eq(projects.id, projectId));
-    
-    console.log(`✅ Updated project ${projectId} with new URLs`);
-  } catch (error) {
-    console.error('Error updating project URLs:', error);
-    throw error;
-  }
-}
-
-// Method to create new project
-async createProject(projectData: {
-  userId: number;
-  name: string;
-  description: string;
-  status: string;
-  projectType: string;
-  deploymentUrl: string;
-  downloadUrl: string;
-  zipUrl: string;
-  buildId: string;
-  lastSessionId: string;
-  framework: string;
-  template: string;
-  lastMessageAt: Date;
-  messageCount: number;
-}): Promise<number> {
-  try {
-    const result = await this.db
-      .insert(projects)
-      .values({
-        ...projectData,
+      // User doesn't exist, create them
+      console.log(`📝 Creating user ${userId} as they don't exist...`);
+      
+      const newUserData = {
+        id: userId,
+        clerkId: userData?.clerkId || `user-${userId}-${Date.now()}`,
+        email: userData?.email || `user${userId}@buildora.dev`,
+        name: userData?.name || `User ${userId}`,
+        plan: 'free' as const,
+        isActive: true,
         createdAt: new Date(),
         updatedAt: new Date()
-      })
-      .returning({ id: projects.id });
-    
-    const projectId = result[0].id;
-    console.log(`✅ Created new project ${projectId}`);
-    return projectId;
-  } catch (error) {
-    console.error('Error creating project:', error);
-    throw error;
+      };
+
+      await this.db.insert(users).values(newUserData);
+      
+      console.log(`✅ Created user ${userId}`);
+      return userId;
+    } catch (error) {
+      console.error(`Error ensuring user ${userId} exists:`, error);
+      throw new Error(`Failed to ensure user ${userId} exists: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
-}
 
+  // NEW: Get the most recent user ID from projects (fallback when no userId provided)
+  async getMostRecentUserId(): Promise<number | null> {
+    try {
+      const recentProjects = await this.db
+        .select({ userId: projects.userId })
+        .from(projects)
+        .orderBy(desc(projects.updatedAt))
+        .limit(1);
 
+      if (recentProjects.length > 0) {
+        return recentProjects[0].userId;
+      }
 
-// Method to get project with deployment history
-async getProjectWithHistory(projectId: number): Promise<any> {
-  try {
-    const project = await this.db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
-    
-    if (!project[0]) {
+      // If no projects exist, check for any user
+      const anyUser = await this.db
+        .select({ id: users.id })
+        .from(users)
+        .orderBy(desc(users.createdAt))
+        .limit(1);
+
+      return anyUser.length > 0 ? anyUser[0].id : null;
+    } catch (error) {
+      console.error('Error getting most recent user ID:', error);
       return null;
     }
-
-    // You could also join with messages or other related tables here
-    return {
-      ...project[0],
-      // Add any additional project history data you want
-    };
-  } catch (error) {
-    console.error('Error getting project with history:', error);
-    return null;
   }
-}
 
-// Method to update project status
-async updateProjectStatus(projectId: number, status: string): Promise<void> {
-  try {
-    await this.db
-      .update(projects)
-      .set({ 
-        status,
-        updatedAt: new Date()
-      })
-      .where(eq(projects.id, projectId));
-  } catch (error) {
-    console.error('Error updating project status:', error);
-    throw error;
+  // UPDATED: Method to get recent projects with user validation
+  async getRecentProjects(limit: number = 10): Promise<any[]> {
+    try {
+      return await this.db
+        .select()
+        .from(projects)
+        .orderBy(desc(projects.updatedAt))
+        .limit(limit);
+    } catch (error) {
+      console.error('Error getting recent projects:', error);
+      return [];
+    }
   }
-}
 
-// Method to link session to project
-async linkSessionToProject(sessionId: string, projectId: number): Promise<void> {
-  try {
-    await this.db
-      .update(projects)
-      .set({ 
-        lastSessionId: sessionId,
-        lastMessageAt: new Date(),
-        updatedAt: new Date()
-      })
-      .where(eq(projects.id, projectId));
-  } catch (error) {
-    console.error('Error linking session to project:', error);
-    throw error;
+  // UPDATED: Enhanced getUserProjects method with user validation
+  async getUserProjects(userId: number): Promise<any[]> {
+    try {
+      // Validate user exists first
+      const userExists = await this.validateUserExists(userId);
+      if (!userExists) {
+        console.warn(`⚠️ User ${userId} does not exist`);
+        return [];
+      }
+
+      return await this.db
+        .select()
+        .from(projects)
+        .where(eq(projects.userId, userId))
+        .orderBy(desc(projects.updatedAt));
+    } catch (error) {
+      console.error('Error getting user projects:', error);
+      return [];
+    }
   }
-}
 
-// Method to increment message count for project
-async incrementProjectMessageCount(sessionId: string): Promise<void> {
-  try {
-    const project = await this.getProjectBySessionId(sessionId);
-    if (project) {
+  // Method to get all projects with their deployment URLs
+  async getAllProjectsWithUrls(): Promise<any[]> {
+    try {
+      return await this.db
+        .select()
+        .from(projects)
+        .where(and(
+          eq(projects.status, 'ready'),
+          sql`${projects.deploymentUrl} IS NOT NULL`
+        ))
+        .orderBy(desc(projects.updatedAt));
+    } catch (error) {
+      console.error('Error getting projects with URLs:', error);
+      return [];
+    }
+  }
+
+  async getProjectBySessionId(sessionId: string): Promise<any> {
+    try {
+      const result = await this.db
+        .select()
+        .from(projects)
+        .where(eq(projects.lastSessionId, sessionId))
+        .orderBy(desc(projects.updatedAt))
+        .limit(1);
+      
+      return result[0] || null;
+    } catch (error) {
+      console.error('Error getting project by session ID:', error);
+      return null;
+    }
+  }
+
+  // Method to get project by build ID
+  async getProjectByBuildId(buildId: string): Promise<any> {
+    try {
+      const result = await this.db
+        .select()
+        .from(projects)
+        .where(eq(projects.buildId, buildId))
+        .orderBy(desc(projects.updatedAt))
+        .limit(1);
+      
+      return result[0] || null;
+    } catch (error) {
+      console.error('Error getting project by build ID:', error);
+      return null;
+    }
+  }
+
+  // Method to update project URLs
+  async updateProjectUrls(projectId: number, updateData: {
+    deploymentUrl: string;
+    downloadUrl: string;
+    zipUrl: string;
+    buildId: string;
+    status: string;
+    lastSessionId: string;
+    lastMessageAt: Date;
+    updatedAt: Date;
+  }): Promise<void> {
+    try {
+      await this.db
+        .update(projects)
+        .set(updateData)
+        .where(eq(projects.id, projectId));
+      
+      console.log(`✅ Updated project ${projectId} with new URLs`);
+    } catch (error) {
+      console.error('Error updating project URLs:', error);
+      throw error;
+    }
+  }
+
+  // UPDATED: Create new project with user validation
+  async createProject(projectData: {
+    userId: number;
+    name: string;
+    description: string;
+    status: string;
+    projectType: string;
+    deploymentUrl: string;
+    downloadUrl: string;
+    zipUrl: string;
+    buildId: string;
+    lastSessionId: string;
+    framework: string;
+    template: string;
+    lastMessageAt: Date;
+    messageCount: number;
+  }): Promise<number> {
+    try {
+      // Ensure the user exists before creating project
+      await this.ensureUserExists(projectData.userId);
+      
+      const result = await this.db
+        .insert(projects)
+        .values({
+          ...projectData,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        })
+        .returning({ id: projects.id });
+      
+      const projectId = result[0].id;
+      console.log(`✅ Created new project ${projectId} for user ${projectData.userId}`);
+      return projectId;
+    } catch (error) {
+      console.error('Error creating project:', error);
+      throw error;
+    }
+  }
+
+  // Method to get project with deployment history
+  async getProjectWithHistory(projectId: number): Promise<any> {
+    try {
+      const project = await this.db
+        .select()
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      
+      if (!project[0]) {
+        return null;
+      }
+
+      return {
+        ...project[0],
+        // Add any additional project history data you want
+      };
+    } catch (error) {
+      console.error('Error getting project with history:', error);
+      return null;
+    }
+  }
+
+  // Method to update project status
+  async updateProjectStatus(projectId: number, status: string): Promise<void> {
+    try {
       await this.db
         .update(projects)
         .set({ 
-          messageCount: project.messageCount + 1,
+          status,
+          updatedAt: new Date()
+        })
+        .where(eq(projects.id, projectId));
+    } catch (error) {
+      console.error('Error updating project status:', error);
+      throw error;
+    }
+  }
+
+  // Method to link session to project
+  async linkSessionToProject(sessionId: string, projectId: number): Promise<void> {
+    try {
+      await this.db
+        .update(projects)
+        .set({ 
+          lastSessionId: sessionId,
           lastMessageAt: new Date(),
           updatedAt: new Date()
         })
-        .where(eq(projects.id, project.id));
+        .where(eq(projects.id, projectId));
+    } catch (error) {
+      console.error('Error linking session to project:', error);
+      throw error;
     }
-  } catch (error) {
-    console.error('Error incrementing project message count:', error);
-    // Don't throw - this is not critical
   }
-}
+
+  // Method to increment message count for project
+  async incrementProjectMessageCount(sessionId: string): Promise<void> {
+    try {
+      const project = await this.getProjectBySessionId(sessionId);
+      if (project) {
+        await this.db
+          .update(projects)
+          .set({ 
+            messageCount: project.messageCount + 1,
+            lastMessageAt: new Date(),
+            updatedAt: new Date()
+          })
+          .where(eq(projects.id, project.id));
+      }
+    } catch (error) {
+      console.error('Error incrementing project message count:', error);
+      // Don't throw - this is not critical
+    }
+  }
+
+  // UPDATED: Save project summary with user context
   async saveProjectSummary(
     summary: string, 
     prompt: string, 
     zipUrl?: string, 
-    buildId?: string
+    buildId?: string,
+    userId?: number
   ): Promise<string | null> {
     try {
+      // If userId provided, ensure they exist
+      if (userId) {
+        await this.ensureUserExists(userId);
+      }
+
       // First, mark all existing summaries as inactive for the default session
       await this.db.update(projectSummaries)
         .set({ isActive: false })
@@ -524,10 +615,10 @@ async incrementProjectMessageCount(sessionId: string): Promise<void> {
     }
   }
 
-  // Add a new message
+  // UPDATED: Add a new message with user context
   async addMessage(
     content: string,
-    messageType: 'user' | 'assistant',
+    messageType: 'user' | 'assistant'|'system',
     metadata?: {
       fileModifications?: string[];
       modificationApproach?: 
@@ -553,9 +644,19 @@ async incrementProjectMessageCount(sessionId: string): Promise<void> {
       downloadUrl?: string;
       zipUrl?: string;
       sessionId?: string;
+      userId?: number;  // NEW: Add userId to metadata
     }
   ): Promise<string> {
     const sessionId = metadata?.sessionId || this.defaultSessionId;
+    
+    // If userId is provided in metadata, ensure they exist
+    if (metadata?.userId) {
+      try {
+        await this.ensureUserExists(metadata.userId);
+      } catch (error) {
+        console.warn(`⚠️ Failed to ensure user ${metadata.userId} exists:`, error);
+      }
+    }
     
     const newMessage: NewMessage = {
       sessionId,
@@ -578,6 +679,7 @@ async incrementProjectMessageCount(sessionId: string): Promise<void> {
         previewUrl: metadata?.previewUrl,
         downloadUrl: metadata?.downloadUrl,
         zipUrl: metadata?.zipUrl,
+        userId: metadata?.userId,  // Include userId in reasoning
         error: metadata?.success === false ? 'Generation failed' : undefined
       }),
       projectSummaryId: metadata?.projectSummaryId || null,
@@ -1094,180 +1196,17 @@ ${newMessagesText}
         .orderBy(desc(conversationStats.lastActivity));
 
      return sessions.map(session => ({
-  sessionId: session.sessionId,
-  projectId: session.projectId,
-  hasActiveConversation: (session.totalMessageCount ?? 0) > 0,
-  messageCount: session.totalMessageCount ?? 0,
-  lastActivity: session.lastActivity || session.createdAt,
-  summaryExists: (session.summaryCount ?? 0) > 0
-}));
+        sessionId: session.sessionId,
+        projectId: session.projectId,
+        hasActiveConversation: (session.totalMessageCount ?? 0) > 0,
+        messageCount: session.totalMessageCount ?? 0,
+        lastActivity: session.lastActivity || session.createdAt,
+        summaryExists: (session.summaryCount ?? 0) > 0
+      }));
 
     } catch (error) {
       console.error('Error getting project sessions:', error);
       return [];
     }
-  }
-}
-
-// Extended class for integration with file modifier
-export class IntelligentFileModifierWithDrizzle extends StatelessIntelligentFileModifier {
-  protected messageDB: DrizzleMessageHistoryDB;
-
-  constructor(
-    anthropic: Anthropic,
-    reactBasePath: string,
-    databaseUrl: string,
-    sessionId: string,
-    redisUrl?: string  
-  ) {
-    super(anthropic, reactBasePath, sessionId, redisUrl); 
-    this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
-  }
-
-  // Initialize the database
-  async initialize(): Promise<void> {
-    await this.messageDB.initializeStats();
-  }
-
-  // Process modification with enhanced conversation history
-  async processModificationWithHistory(prompt: string): Promise<ModificationResult> {
-    // Add user message
-    await this.messageDB.addMessage(prompt, 'user');
-
-    // Get enhanced conversation context
-    const context = await this.messageDB.getEnhancedContext();
-
-    // Process the modification with enhanced context
-    const result = await super.processModification(prompt, context);
-
-    const typedResult: ModificationResult = {
-      ...result,
-      approach: result.approach as 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION' | undefined
-    };
-
-    // Save the modification result
-    await this.messageDB.saveModification({
-      prompt,
-      result: typedResult,
-      approach: typedResult.approach || 'TARGETED_NODES',
-      filesModified: typedResult.selectedFiles || [],
-      filesCreated: typedResult.addedFiles || typedResult.createdFiles?.map(f => f.path) || [],
-      timestamp: new Date().toISOString()
-    });
-
-    return typedResult;
-  }
-
-  // Get the message database instance for direct access
-  getMessageDB(): DrizzleMessageHistoryDB {
-    return this.messageDB;
-  }
-
-  // Get comprehensive conversation data
-  async getConversationData(): Promise<{
-    messages: Message[];
-    summaryCount: number;
-    totalMessages: number;
-    modificationStats: any;
-  }> {
-    const conversation = await this.messageDB.getRecentConversation();
-    const modificationStats = await this.messageDB.getModificationStats();
-    
-    return {
-      ...conversation,
-      modificationStats
-    };
-  }
-
-  // Get conversation stats
-  async getStats(): Promise<ConversationStats | null> {
-    return await this.messageDB.getConversationStats();
-  }
-}
-
-// Create a simple wrapper for use in endpoints
-export class ConversationHelper {
-  private messageDB: DrizzleMessageHistoryDB;
-
-  constructor(databaseUrl: string, anthropic: Anthropic) {
-    this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
-  }
-
-  // Initialize
-  async initialize(): Promise<void> {
-    await this.messageDB.initializeStats();
-  }
-
-  // Get enhanced context for use in endpoints
-  async getEnhancedContext(): Promise<string> {
-    return await this.messageDB.getEnhancedContext();
-  }
-
-  // Save modification
-  async saveModification(modification: ModificationRecord): Promise<void> {
-    await this.messageDB.saveModification(modification);
-  }
-
-  // Get conversation for display
-  async getConversation(): Promise<{
-    messages: Message[];
-    summaryCount: number;
-    totalMessages: number;
-  }> {
-    return await this.messageDB.getRecentConversation();
-  }
-
-  // Get modification statistics
-  async getModificationStats(): Promise<any> {
-    return await this.messageDB.getModificationStats();
-  }
-
-  // Get project summary for use in endpoints
-  async getProjectSummary(): Promise<string | null> {
-    return await this.messageDB.getProjectSummaryForScope();
-  }
-
-  // Save project summary from endpoints (now supports ZIP URL and buildId)
-  async saveProjectSummary(
-    summary: string, 
-    prompt: string, 
-    zipUrl?: string, 
-    buildId?: string
-  ): Promise<string | null> {
-    return await this.messageDB.saveProjectSummary(summary, prompt, zipUrl, buildId);
-  }
-
-  // Update project summary from endpoints
-  async updateProjectSummary(
-    summaryId: string, 
-    zipUrl: string, 
-    buildId: string
-  ): Promise<boolean> {
-    return await this.messageDB.updateProjectSummary(summaryId, zipUrl, buildId);
-  }
-
-  // Get conversation with summary (keeping for backward compatibility)
-  async getConversationWithSummary(): Promise<{
-    messages: any[];
-    summaryCount: number;
-    totalMessages: number;
-  }> {
-    const conversation = await this.messageDB.getRecentConversation();
-
-    return {
-      messages: conversation.messages.map((msg: any) => ({
-        id: msg.id,
-        content: msg.content,
-        messageType: msg.messageType,
-        metadata: {
-          fileModifications: msg.fileModifications,
-          modificationApproach: msg.modificationApproach,
-          modificationSuccess: msg.modificationSuccess
-        },
-        createdAt: msg.createdAt
-      })),
-      summaryCount: conversation.summaryCount,
-      totalMessages: conversation.totalMessages
-    };
   }
 }

@@ -14,8 +14,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const projectService_1 = __importDefault(require("../services/projectService"));
-const messageService_1 = __importDefault(require("../services/messageService"));
+const messageService_1 = require("../services/messageService");
+const sdk_1 = __importDefault(require("@anthropic-ai/sdk"));
 const router = (0, express_1.Router)();
+// Initialize message service
+const anthropic = new sdk_1.default({
+    apiKey: process.env.ANTHROPIC_API_KEY || ""
+});
+const messageService = (0, messageService_1.createMessageService)(process.env.DATABASE_URL || "", anthropic, process.env.REDIS_URL);
 // Create project
 router.post("/", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -40,9 +46,6 @@ router.get("/user/:userId", (req, res) => __awaiter(void 0, void 0, void 0, func
 router.get("/:projectId", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const project = yield projectService_1.default.getProjectById(parseInt(req.params.projectId));
-        // if (!project) {
-        //   return res.json();
-        // }
         res.json(project);
     }
     catch (error) {
@@ -69,11 +72,21 @@ router.delete("/:projectId", (req, res) => __awaiter(void 0, void 0, void 0, fun
         res.status(500).json({ error: error.message });
     }
 }));
-// Get messages for a project
+//@ts-ignore
 router.get("/:projectId/messages", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const messages = yield messageService_1.default.getMessagesByProjectId(parseInt(req.params.projectId));
-        res.json(messages);
+        const projectId = parseInt(req.params.projectId);
+        // Get project to find the user ID
+        const project = yield projectService_1.default.getProjectById(projectId);
+        if (!project) {
+            return res.status(404).json({ error: "Project not found" });
+        }
+        // Use getUserMessages since getMessagesByProjectId doesn't exist in new service
+        const result = yield messageService.getUserMessages(project.userId);
+        if (!result.success) {
+            return res.status(500).json({ error: result.error });
+        }
+        res.json(result.data);
     }
     catch (error) {
         res.status(500).json({ error: error.message });

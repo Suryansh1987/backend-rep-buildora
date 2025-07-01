@@ -46,7 +46,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeModificationRoutes = initializeModificationRoutes;
-// routes/modification.ts - Updated with simple URL management by userId
+// routes/modification.ts - Updated with dynamic user handling and improved error handling
 const express_1 = __importDefault(require("express"));
 const filemodifier_1 = require("../services/filemodifier");
 const uuid_1 = require("uuid");
@@ -120,11 +120,13 @@ class StatelessConversationHelper {
         });
     }
 }
-// SIMPLE URL MANAGEMENT FUNCTION
+// IMPROVED URL MANAGEMENT FUNCTION WITH DYNAMIC USER HANDLING
 function saveProjectUrlsByUserId(messageDB, userId, buildId, urls, sessionId, prompt) {
     return __awaiter(this, void 0, void 0, function* () {
         try {
-            console.log(`📊 Simple URL Management - User: ${userId}, Build: ${buildId}`);
+            console.log(`📊 Dynamic URL Management - User: ${userId}, Build: ${buildId}`);
+            // First, ensure the user exists in the database
+            yield messageDB.ensureUserExists(userId);
             // Get user's most recent project
             const userProjects = yield messageDB.getUserProjects(userId);
             if (userProjects.length > 0) {
@@ -168,6 +170,41 @@ function saveProjectUrlsByUserId(messageDB, userId, buildId, urls, sessionId, pr
         catch (error) {
             console.error('❌ Failed to save project URLs:', error);
             throw error;
+        }
+    });
+}
+// FALLBACK USER RESOLUTION FUNCTION
+function resolveUserId(messageDB, providedUserId, sessionId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            // Priority 1: Use provided userId if valid
+            if (providedUserId && (yield messageDB.validateUserExists(providedUserId))) {
+                return providedUserId;
+            }
+            // Priority 2: Get userId from session's most recent project
+            if (sessionId) {
+                const sessionProject = yield messageDB.getProjectBySessionId(sessionId);
+                if (sessionProject && sessionProject.userId) {
+                    return sessionProject.userId;
+                }
+            }
+            // Priority 3: Get most recent user from any project
+            const mostRecentUserId = yield messageDB.getMostRecentUserId();
+            if (mostRecentUserId && (yield messageDB.validateUserExists(mostRecentUserId))) {
+                return mostRecentUserId;
+            }
+            // Priority 4: Create a new user with current timestamp
+            const newUserId = Date.now() % 1000000; // Use timestamp-based ID
+            yield messageDB.ensureUserExists(newUserId, {
+                email: `user${newUserId}@buildora.dev`,
+                name: `User ${newUserId}`
+            });
+            console.log(`✅ Created new user ${newUserId} as fallback`);
+            return newUserId;
+        }
+        catch (error) {
+            console.error('❌ Failed to resolve user ID:', error);
+            throw new Error('Could not resolve or create user');
         }
     });
 }
@@ -215,10 +252,10 @@ function cleanupTempDirectory(buildId) {
 // Initialize routes with dependencies
 function initializeModificationRoutes(anthropic, messageDB, redis, sessionManager) {
     const conversationHelper = new StatelessConversationHelper(messageDB, redis);
-    // STATELESS STREAMING MODIFICATION ENDPOINT
+    // STATELESS STREAMING MODIFICATION ENDPOINT WITH DYNAMIC USER HANDLING
     router.post("/stream", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e, _f;
-        const { prompt, sessionId: clientSessionId, userId = 1 // Default userId, should come from authentication
+        const { prompt, sessionId: clientSessionId, userId: providedUserId // This can be undefined, null, or a number
          } = req.body;
         if (!prompt) {
             res.status(400).json({
@@ -229,6 +266,22 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
         }
         const sessionId = clientSessionId || sessionManager.generateSessionId();
         const buildId = (0, uuid_1.v4)();
+        // Resolve user ID dynamically
+        let userId;
+        try {
+            userId = yield resolveUserId(messageDB, providedUserId, sessionId);
+            console.log(`[${buildId}] Resolved user ID: ${userId} (provided: ${providedUserId})`);
+        }
+        catch (error) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to resolve user for modification',
+                details: error instanceof Error ? error.message : 'Unknown error',
+                buildId,
+                sessionId
+            });
+            return;
+        }
         console.log(`[${buildId}] Starting modification for user: ${userId}, session: ${sessionId}`);
         console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
         res.writeHead(200, {
@@ -331,7 +384,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             const startTime = Date.now();
             const result = yield fileModifier.processModification(enhancedPrompt, undefined, (_c = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _c === void 0 ? void 0 : _c.summary, (summary, prompt) => __awaiter(this, void 0, void 0, function* () {
                 try {
-                    const summaryId = yield messageDB.saveProjectSummary(summary, prompt, "", buildId);
+                    const summaryId = yield messageDB.saveProjectSummary(summary, prompt, "", buildId, userId);
                     console.log(`💾 Saved project summary, ID: ${summaryId}`);
                     return summaryId;
                 }
@@ -386,7 +439,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('complete', {
                         success: true,
                         data: {
-                            workflow: "simple-user-based-modification",
+                            workflow: "dynamic-user-based-modification",
                             approach: result.approach || 'UNKNOWN',
                             selectedFiles: result.selectedFiles || [],
                             addedFiles: result.addedFiles || [],
@@ -422,7 +475,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('complete', {
                         success: true,
                         data: {
-                            workflow: "simple-user-based-modification-error",
+                            workflow: "dynamic-user-based-modification-error",
                             approach: result.approach || 'UNKNOWN',
                             buildError: buildError instanceof Error ? buildError.message : 'Build failed',
                             buildId,
@@ -465,11 +518,11 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             res.end();
         }
     }));
-    // NON-STREAMING MODIFICATION ENDPOINT
+    // NON-STREAMING MODIFICATION ENDPOINT WITH DYNAMIC USER HANDLING
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e;
         try {
-            const { prompt, sessionId: clientSessionId, userId = 1 // Default userId, should come from authentication
+            const { prompt, sessionId: clientSessionId, userId: providedUserId // This can be undefined, null, or a number
              } = req.body;
             if (!prompt) {
                 res.status(400).json({
@@ -480,6 +533,22 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             }
             const sessionId = clientSessionId || sessionManager.generateSessionId();
             const buildId = (0, uuid_1.v4)();
+            // Resolve user ID dynamically
+            let userId;
+            try {
+                userId = yield resolveUserId(messageDB, providedUserId, sessionId);
+                console.log(`[${buildId}] Resolved user ID: ${userId} (provided: ${providedUserId})`);
+            }
+            catch (error) {
+                res.status(500).json({
+                    success: false,
+                    error: 'Failed to resolve user for modification',
+                    details: error instanceof Error ? error.message : 'Unknown error',
+                    buildId,
+                    sessionId
+                });
+                return;
+            }
             console.log(`[${buildId}] Starting non-streaming modification for user: ${userId}`);
             const cleanupTimer = setTimeout(() => {
                 cleanupTempDirectory(buildId);
@@ -564,7 +633,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 // Process modification
                 const result = yield fileModifier.processModification(enhancedPrompt, undefined, (_a = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _a === void 0 ? void 0 : _a.summary, (summary, prompt) => __awaiter(this, void 0, void 0, function* () {
                     try {
-                        const summaryId = yield messageDB.saveProjectSummary(summary, prompt, "", buildId);
+                        const summaryId = yield messageDB.saveProjectSummary(summary, prompt, "", buildId, userId);
                         console.log(`💾 Saved project summary, ID: ${summaryId}`);
                         return summaryId;
                     }
@@ -621,7 +690,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 yield messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
                             }
                         }
-                        // SIMPLE URL SAVING BY USER ID
+                        // DYNAMIC URL SAVING BY USER ID
                         console.log(`[${buildId}] 💾 Saving deployment URLs for user ${userId}...`);
                         const urlResult = yield saveProjectUrlsByUserId(messageDB, userId, buildId, {
                             deploymentUrl: previewUrl,
@@ -637,7 +706,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         res.json({
                             success: true,
                             data: {
-                                workflow: "simple-user-based-modification",
+                                workflow: "dynamic-user-based-modification",
                                 approach: result.approach || 'UNKNOWN',
                                 selectedFiles: result.selectedFiles || [],
                                 addedFiles: result.addedFiles || [],
@@ -675,7 +744,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         res.json({
                             success: true,
                             data: {
-                                workflow: "simple-user-based-modification-error",
+                                workflow: "dynamic-user-based-modification-error",
                                 approach: result.approach || 'UNKNOWN',
                                 selectedFiles: result.selectedFiles || [],
                                 addedFiles: result.addedFiles || [],
@@ -714,7 +783,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         approach: result.approach,
                         reasoning: result.reasoning,
                         selectedFiles: result.selectedFiles || [],
-                        workflow: "simple-user-based-modification",
+                        workflow: "dynamic-user-based-modification",
                         buildId: buildId,
                         sessionId: sessionId,
                         userId: userId,
@@ -730,7 +799,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     success: false,
                     error: 'Failed to setup project environment',
                     details: downloadError instanceof Error ? downloadError.message : 'Unknown error',
-                    workflow: "simple-user-based-modification",
+                    workflow: "dynamic-user-based-modification",
                     buildId: buildId,
                     sessionId: sessionId,
                     userId: userId
@@ -745,18 +814,28 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 success: false,
                 error: 'Internal server error during modification',
                 details: error.message,
-                workflow: "simple-user-based-modification",
+                workflow: "dynamic-user-based-modification",
                 buildId: buildId,
                 sessionId: sessionId,
-                userId: req.body.userId || 1
+                userId: req.body.userId || 'unresolved'
             });
         }
     }));
-    // SIMPLE ENDPOINT TO GET USER'S PROJECTS
+    // UPDATED ENDPOINT TO GET USER'S PROJECTS WITH DYNAMIC USER RESOLUTION
     router.get("/user/:userId/projects", (req, res) => __awaiter(this, void 0, void 0, function* () {
         try {
-            const { userId } = req.params;
-            const projects = yield messageDB.getUserProjects(parseInt(userId));
+            const { userId: paramUserId } = req.params;
+            const userId = parseInt(paramUserId);
+            if (isNaN(userId)) {
+                res.status(400).json({
+                    success: false,
+                    error: 'Invalid user ID provided'
+                });
+                return;
+            }
+            // Ensure user exists before getting projects
+            const resolvedUserId = yield resolveUserId(messageDB, userId);
+            const projects = yield messageDB.getUserProjects(resolvedUserId);
             res.json({
                 success: true,
                 data: projects.map(project => ({
@@ -774,13 +853,43 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     lastMessageAt: project.lastMessageAt,
                     createdAt: project.createdAt,
                     updatedAt: project.updatedAt
-                }))
+                })),
+                userId: resolvedUserId,
+                totalProjects: projects.length
             });
         }
         catch (error) {
             res.status(500).json({
                 success: false,
                 error: 'Failed to get user projects',
+                details: error instanceof Error ? error.message : 'Unknown error'
+            });
+        }
+    }));
+    // NEW ENDPOINT TO GET OR CREATE USER
+    router.post("/user/ensure", (req, res) => __awaiter(this, void 0, void 0, function* () {
+        try {
+            const { userId, userData } = req.body;
+            if (!userId) {
+                res.status(400).json({
+                    success: false,
+                    error: 'User ID is required'
+                });
+                return;
+            }
+            const resolvedUserId = yield messageDB.ensureUserExists(parseInt(userId), userData);
+            res.json({
+                success: true,
+                data: {
+                    userId: resolvedUserId,
+                    action: resolvedUserId === parseInt(userId) ? 'existed' : 'created'
+                }
+            });
+        }
+        catch (error) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to ensure user exists',
                 details: error instanceof Error ? error.message : 'Unknown error'
             });
         }

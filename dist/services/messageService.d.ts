@@ -1,90 +1,131 @@
-interface CreateMessageData {
-    projectId: number;
-    sessionId?: string;
-    role: 'user' | 'assistant';
+import Anthropic from '@anthropic-ai/sdk';
+interface CreateMessageRequest {
     content: string;
-    metadata?: any;
+    messageType: 'user' | 'assistant' | 'system';
+    userId?: number;
+    sessionId?: string;
+    metadata?: {
+        fileModifications?: string[];
+        modificationApproach?: 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION' | 'FULL_FILE_GENERATION';
+        modificationSuccess?: boolean;
+        createdFiles?: string[];
+        addedFiles?: string[];
+        promptType?: string;
+        requestType?: string;
+        relatedUserMessageId?: string;
+        success?: boolean;
+        processingTimeMs?: number;
+        tokenUsage?: any;
+        responseLength?: number;
+        buildId?: string;
+        previewUrl?: string;
+        downloadUrl?: string;
+        zipUrl?: string;
+        projectId?: number;
+        [key: string]: any;
+    };
+    userData?: {
+        clerkId?: string;
+        email?: string;
+        name?: string;
+    };
 }
 interface MessageResponse {
-    id: string;
-    projectId: number | null;
-    sessionId: string;
-    content: string;
-    role: 'user' | 'assistant';
-    metadata?: any;
-    createdAt: Date;
+    success: boolean;
+    data?: {
+        messageId: string;
+        sessionId: string;
+        userId: number;
+        timestamp: string;
+        metadata?: any;
+    };
+    error?: string;
+    details?: string;
 }
 declare class MessageService {
-    private generateSessionId;
-    /**
-     * Create a message using the new CI schema
-     */
-    createMessage(messageData: CreateMessageData): Promise<MessageResponse>;
-    /**
-     * Get messages by project ID (from all sessions)
-     */
-    getMessagesByProjectId(projectId: number): Promise<MessageResponse[]>;
-    /**
-     * Get messages by session ID
-     */
-    getMessagesBySessionId(sessionId: string): Promise<MessageResponse[]>;
-    /**
-     * Get messages by project ID and session ID
-     */
-    getMessagesByProjectAndSession(projectId: number, sessionId: string): Promise<MessageResponse[]>;
-    /**
-     * Get recent messages for a project (latest session)
-     */
-    getRecentMessagesByProjectId(projectId: number, limit?: number): Promise<MessageResponse[]>;
-    /**
-     * Delete messages by project ID (all sessions)
-     */
-    deleteMessagesByProjectId(projectId: number): Promise<boolean>;
-    /**
-     * Delete messages by session ID
-     */
-    deleteMessagesBySessionId(sessionId: string): Promise<boolean>;
-    /**
-     * Get session information for a project
-     */
-    getProjectSessions(projectId: number): Promise<Array<{
-        sessionId: string;
-        messageCount: number;
-        lastActivity: Date;
-        isActive: boolean;
-    }>>;
-    /**
-     * Get message count for a project
-     */
-    getProjectMessageCount(projectId: number): Promise<number>;
-    /**
-     * Get message count for a session
-     */
-    getSessionMessageCount(sessionId: string): Promise<number>;
-    /**
-     * Create a new session for a project
-     */
-    createSession(projectId: number): Promise<string>;
-    /**
-     * Get active session for a project (latest session with activity)
-     */
-    getActiveProjectSession(projectId: number): Promise<string | null>;
-    private ensureSessionStats;
-    private updateSessionStats;
-    /**
-     * @deprecated Use createMessage with explicit session management
-     * Legacy method for backward compatibility
-     */
-    createLegacyMessage(messageData: {
-        projectId: number;
-        role: 'user' | 'assistant';
-        content: string;
-        metadata?: any;
-    }): Promise<MessageResponse>;
-    /**
-     * Get conversation context for a project (combines recent messages)
-     */
-    getProjectConversationContext(projectId: number): Promise<string>;
+    private messageDB;
+    private redis;
+    private sessionManager;
+    constructor(databaseUrl: string, anthropic: Anthropic, redisUrl?: string);
+    initialize(): Promise<void>;
+    private resolveUserId;
+    createMessage(request: CreateMessageRequest): Promise<MessageResponse>;
+    getUserMessages(userId: number, limit?: number): Promise<{
+        success: boolean;
+        data?: any[];
+        error?: string;
+    }>;
+    getSessionMessages(sessionId: string): Promise<{
+        success: boolean;
+        data?: any[];
+        error?: string;
+    }>;
+    ensureUser(userId: number, userData?: {
+        clerkId?: string;
+        email?: string;
+        name?: string;
+    }): Promise<{
+        success: boolean;
+        data?: {
+            userId: number;
+            action: 'created' | 'existed';
+        };
+        error?: string;
+    }>;
+    getUserMessageStats(userId: number): Promise<{
+        success: boolean;
+        data?: {
+            totalMessages: number;
+            userMessages: number;
+            assistantMessages: number;
+            systemMessages: number;
+            recentActivity: Date | null;
+            modificationCount: number;
+        };
+        error?: string;
+    }>;
+    deleteUserMessages(userId: number, sessionId?: string): Promise<{
+        success: boolean;
+        data?: {
+            deletedCount: number;
+        };
+        error?: string;
+    }>;
+    getUserConversationContext(userId: number, sessionId?: string): Promise<{
+        success: boolean;
+        data?: string;
+        error?: string;
+    }>;
+    exportUserConversation(userId: number, format?: 'json' | 'csv'): Promise<{
+        success: boolean;
+        data?: any;
+        error?: string;
+    }>;
+    getServiceHealth(): Promise<{
+        success: boolean;
+        data?: {
+            status: 'healthy' | 'degraded' | 'unhealthy';
+            database: boolean;
+            redis: boolean;
+            totalUsers: number;
+            totalMessages: number;
+            activeeSessions: number;
+            uptime: string;
+        };
+        error?: string;
+    }>;
+    cleanupOldData(options?: {
+        olderThanDays?: number;
+        userId?: number;
+        dryRun?: boolean;
+    }): Promise<{
+        success: boolean;
+        data?: {
+            messagesDeleted: number;
+            sessionsCleared: number;
+        };
+        error?: string;
+    }>;
 }
-declare const _default: MessageService;
-export default _default;
+export declare function createMessageService(databaseUrl: string, anthropic: Anthropic, redisUrl?: string): MessageService;
+export default MessageService;

@@ -9,16 +9,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.ConversationHelper = exports.IntelligentFileModifierWithDrizzle = exports.DrizzleMessageHistoryDB = void 0;
-// db/Messagesummary.ts - Updated to use separate component integrator schema with ZIP URL support
+exports.DrizzleMessageHistoryDB = void 0;
+// db/Messagesummary.ts - Updated with dynamic user handling and proper fallback mechanisms
 const neon_http_1 = require("drizzle-orm/neon-http");
 const serverless_1 = require("@neondatabase/serverless");
 const drizzle_orm_1 = require("drizzle-orm");
 const project_schema_1 = require("./project_schema");
 // Import component integrator specific schema
 const message_schema_1 = require("./message_schema");
-// Import the modular file modifier with proper types
-const filemodifier_1 = require("../services/filemodifier");
 class DrizzleMessageHistoryDB {
     constructor(databaseUrl, anthropic) {
         this.defaultSessionId = 'default-session';
@@ -26,9 +24,81 @@ class DrizzleMessageHistoryDB {
         this.db = (0, neon_http_1.drizzle)(sqlConnection);
         this.anthropic = anthropic;
     }
-    // Add these methods to your DrizzleMessageHistoryDB class
-    // Add these methods to your DrizzleMessageHistoryDB class in db/Messagesummary.ts
-    // Method to get recent projects (needed for fallback identification)
+    // NEW: Validate if user exists in database
+    validateUserExists(userId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const user = yield this.db
+                    .select()
+                    .from(project_schema_1.users)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.users.id, userId))
+                    .limit(1);
+                return user.length > 0;
+            }
+            catch (error) {
+                console.error(`Error validating user ${userId}:`, error);
+                return false;
+            }
+        });
+    }
+    // NEW: Create user if they don't exist (for external auth systems like Clerk)
+    ensureUserExists(userId, userData) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Check if user exists
+                const userExists = yield this.validateUserExists(userId);
+                if (userExists) {
+                    return userId;
+                }
+                // User doesn't exist, create them
+                console.log(`📝 Creating user ${userId} as they don't exist...`);
+                const newUserData = {
+                    id: userId,
+                    clerkId: (userData === null || userData === void 0 ? void 0 : userData.clerkId) || `user-${userId}-${Date.now()}`,
+                    email: (userData === null || userData === void 0 ? void 0 : userData.email) || `user${userId}@buildora.dev`,
+                    name: (userData === null || userData === void 0 ? void 0 : userData.name) || `User ${userId}`,
+                    plan: 'free',
+                    isActive: true,
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                };
+                yield this.db.insert(project_schema_1.users).values(newUserData);
+                console.log(`✅ Created user ${userId}`);
+                return userId;
+            }
+            catch (error) {
+                console.error(`Error ensuring user ${userId} exists:`, error);
+                throw new Error(`Failed to ensure user ${userId} exists: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
+        });
+    }
+    // NEW: Get the most recent user ID from projects (fallback when no userId provided)
+    getMostRecentUserId() {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const recentProjects = yield this.db
+                    .select({ userId: project_schema_1.projects.userId })
+                    .from(project_schema_1.projects)
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .limit(1);
+                if (recentProjects.length > 0) {
+                    return recentProjects[0].userId;
+                }
+                // If no projects exist, check for any user
+                const anyUser = yield this.db
+                    .select({ id: project_schema_1.users.id })
+                    .from(project_schema_1.users)
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.users.createdAt))
+                    .limit(1);
+                return anyUser.length > 0 ? anyUser[0].id : null;
+            }
+            catch (error) {
+                console.error('Error getting most recent user ID:', error);
+                return null;
+            }
+        });
+    }
+    // UPDATED: Method to get recent projects with user validation
     getRecentProjects() {
         return __awaiter(this, arguments, void 0, function* (limit = 10) {
             try {
@@ -44,10 +114,16 @@ class DrizzleMessageHistoryDB {
             }
         });
     }
-    // Enhanced getUserProjects method (already exists but making sure it's correct)
+    // UPDATED: Enhanced getUserProjects method with user validation
     getUserProjects(userId) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
+                // Validate user exists first
+                const userExists = yield this.validateUserExists(userId);
+                if (!userExists) {
+                    console.warn(`⚠️ User ${userId} does not exist`);
+                    return [];
+                }
                 return yield this.db
                     .select()
                     .from(project_schema_1.projects)
@@ -127,16 +203,18 @@ class DrizzleMessageHistoryDB {
             }
         });
     }
-    // Method to create new project
+    // UPDATED: Create new project with user validation
     createProject(projectData) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
+                // Ensure the user exists before creating project
+                yield this.ensureUserExists(projectData.userId);
                 const result = yield this.db
                     .insert(project_schema_1.projects)
                     .values(Object.assign(Object.assign({}, projectData), { createdAt: new Date(), updatedAt: new Date() }))
                     .returning({ id: project_schema_1.projects.id });
                 const projectId = result[0].id;
-                console.log(`✅ Created new project ${projectId}`);
+                console.log(`✅ Created new project ${projectId} for user ${projectData.userId}`);
                 return projectId;
             }
             catch (error) {
@@ -157,7 +235,6 @@ class DrizzleMessageHistoryDB {
                 if (!project[0]) {
                     return null;
                 }
-                // You could also join with messages or other related tables here
                 return Object.assign({}, project[0]);
             }
             catch (error) {
@@ -225,10 +302,15 @@ class DrizzleMessageHistoryDB {
             }
         });
     }
-    saveProjectSummary(summary, prompt, zipUrl, buildId) {
+    // UPDATED: Save project summary with user context
+    saveProjectSummary(summary, prompt, zipUrl, buildId, userId) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
             try {
+                // If userId provided, ensure they exist
+                if (userId) {
+                    yield this.ensureUserExists(userId);
+                }
                 // First, mark all existing summaries as inactive for the default session
                 yield this.db.update(message_schema_1.projectSummaries)
                     .set({ isActive: false })
@@ -435,10 +517,19 @@ class DrizzleMessageHistoryDB {
             }
         });
     }
-    // Add a new message
+    // UPDATED: Add a new message with user context
     addMessage(content, messageType, metadata) {
         return __awaiter(this, void 0, void 0, function* () {
             const sessionId = (metadata === null || metadata === void 0 ? void 0 : metadata.sessionId) || this.defaultSessionId;
+            // If userId is provided in metadata, ensure they exist
+            if (metadata === null || metadata === void 0 ? void 0 : metadata.userId) {
+                try {
+                    yield this.ensureUserExists(metadata.userId);
+                }
+                catch (error) {
+                    console.warn(`⚠️ Failed to ensure user ${metadata.userId} exists:`, error);
+                }
+            }
             const newMessage = {
                 sessionId,
                 projectId: null,
@@ -460,6 +551,7 @@ class DrizzleMessageHistoryDB {
                     previewUrl: metadata === null || metadata === void 0 ? void 0 : metadata.previewUrl,
                     downloadUrl: metadata === null || metadata === void 0 ? void 0 : metadata.downloadUrl,
                     zipUrl: metadata === null || metadata === void 0 ? void 0 : metadata.zipUrl,
+                    userId: metadata === null || metadata === void 0 ? void 0 : metadata.userId, // Include userId in reasoning
                     error: (metadata === null || metadata === void 0 ? void 0 : metadata.success) === false ? 'Generation failed' : undefined
                 }),
                 projectSummaryId: (metadata === null || metadata === void 0 ? void 0 : metadata.projectSummaryId) || null,
@@ -942,138 +1034,4 @@ ${newMessagesText}
     }
 }
 exports.DrizzleMessageHistoryDB = DrizzleMessageHistoryDB;
-// Extended class for integration with file modifier
-class IntelligentFileModifierWithDrizzle extends filemodifier_1.StatelessIntelligentFileModifier {
-    constructor(anthropic, reactBasePath, databaseUrl, sessionId, redisUrl) {
-        super(anthropic, reactBasePath, sessionId, redisUrl);
-        this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
-    }
-    // Initialize the database
-    initialize() {
-        return __awaiter(this, void 0, void 0, function* () {
-            yield this.messageDB.initializeStats();
-        });
-    }
-    // Process modification with enhanced conversation history
-    processModificationWithHistory(prompt) {
-        const _super = Object.create(null, {
-            processModification: { get: () => super.processModification }
-        });
-        return __awaiter(this, void 0, void 0, function* () {
-            var _a;
-            // Add user message
-            yield this.messageDB.addMessage(prompt, 'user');
-            // Get enhanced conversation context
-            const context = yield this.messageDB.getEnhancedContext();
-            // Process the modification with enhanced context
-            const result = yield _super.processModification.call(this, prompt, context);
-            const typedResult = Object.assign(Object.assign({}, result), { approach: result.approach });
-            // Save the modification result
-            yield this.messageDB.saveModification({
-                prompt,
-                result: typedResult,
-                approach: typedResult.approach || 'TARGETED_NODES',
-                filesModified: typedResult.selectedFiles || [],
-                filesCreated: typedResult.addedFiles || ((_a = typedResult.createdFiles) === null || _a === void 0 ? void 0 : _a.map(f => f.path)) || [],
-                timestamp: new Date().toISOString()
-            });
-            return typedResult;
-        });
-    }
-    // Get the message database instance for direct access
-    getMessageDB() {
-        return this.messageDB;
-    }
-    // Get comprehensive conversation data
-    getConversationData() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const conversation = yield this.messageDB.getRecentConversation();
-            const modificationStats = yield this.messageDB.getModificationStats();
-            return Object.assign(Object.assign({}, conversation), { modificationStats });
-        });
-    }
-    // Get conversation stats
-    getStats() {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.getConversationStats();
-        });
-    }
-}
-exports.IntelligentFileModifierWithDrizzle = IntelligentFileModifierWithDrizzle;
-// Create a simple wrapper for use in endpoints
-class ConversationHelper {
-    constructor(databaseUrl, anthropic) {
-        this.messageDB = new DrizzleMessageHistoryDB(databaseUrl, anthropic);
-    }
-    // Initialize
-    initialize() {
-        return __awaiter(this, void 0, void 0, function* () {
-            yield this.messageDB.initializeStats();
-        });
-    }
-    // Get enhanced context for use in endpoints
-    getEnhancedContext() {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.getEnhancedContext();
-        });
-    }
-    // Save modification
-    saveModification(modification) {
-        return __awaiter(this, void 0, void 0, function* () {
-            yield this.messageDB.saveModification(modification);
-        });
-    }
-    // Get conversation for display
-    getConversation() {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.getRecentConversation();
-        });
-    }
-    // Get modification statistics
-    getModificationStats() {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.getModificationStats();
-        });
-    }
-    // Get project summary for use in endpoints
-    getProjectSummary() {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.getProjectSummaryForScope();
-        });
-    }
-    // Save project summary from endpoints (now supports ZIP URL and buildId)
-    saveProjectSummary(summary, prompt, zipUrl, buildId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.saveProjectSummary(summary, prompt, zipUrl, buildId);
-        });
-    }
-    // Update project summary from endpoints
-    updateProjectSummary(summaryId, zipUrl, buildId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            return yield this.messageDB.updateProjectSummary(summaryId, zipUrl, buildId);
-        });
-    }
-    // Get conversation with summary (keeping for backward compatibility)
-    getConversationWithSummary() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const conversation = yield this.messageDB.getRecentConversation();
-            return {
-                messages: conversation.messages.map((msg) => ({
-                    id: msg.id,
-                    content: msg.content,
-                    messageType: msg.messageType,
-                    metadata: {
-                        fileModifications: msg.fileModifications,
-                        modificationApproach: msg.modificationApproach,
-                        modificationSuccess: msg.modificationSuccess
-                    },
-                    createdAt: msg.createdAt
-                })),
-                summaryCount: conversation.summaryCount,
-                totalMessages: conversation.totalMessages
-            };
-        });
-    }
-}
-exports.ConversationHelper = ConversationHelper;
 //# sourceMappingURL=messagesummary.js.map

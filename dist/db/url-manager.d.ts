@@ -3,7 +3,7 @@ export declare class EnhancedProjectUrlManager {
     private messageDB;
     constructor(messageDB: DrizzleMessageHistoryDB);
     /**
-     * Main method to save or update project URLs with comprehensive identification
+     * Main method to save or update project URLs with comprehensive identification and duplicate prevention
      */
     saveOrUpdateProjectUrls(sessionId: string, buildId: string, urls: {
         deploymentUrl: string;
@@ -35,7 +35,11 @@ export declare class EnhancedProjectUrlManager {
      */
     private updateExistingProject;
     /**
-     * Create new project with comprehensive metadata
+     * Create new project with comprehensive metadata, user validation, and duplicate checking
+     */
+    private createNewProjectWithDuplicateCheck;
+    /**
+     * DEPRECATED: Use createNewProjectWithDuplicateCheck instead
      */
     private createNewProject;
     /**
@@ -74,4 +78,37 @@ export declare class EnhancedProjectUrlManager {
      * Get project deployment history
      */
     getProjectDeploymentHistory(projectId: number): Promise<any[]>;
+    /**
+     * Validate project ownership
+     */
+    validateProjectOwnership(projectId: number, userId: number): Promise<boolean>;
+    /**
+     * Get user's project statistics
+     */
+    getUserProjectStats(userId: number): Promise<{
+        totalProjects: number;
+        activeProjects: number;
+        totalDeployments: number;
+        lastActivity: Date | null;
+    }>;
+    /**
+     * Clean up old projects for a user (keep only latest N projects)
+     */
+    cleanupUserProjects(userId: number, keepLatest?: number): Promise<number>;
+    /**
+     * Get projects by status
+     */
+    getProjectsByStatus(status: string, limit?: number): Promise<any[]>;
+    /**
+     * Search projects by name or description
+     */
+    searchProjects(query: string, userId?: number): Promise<any[]>;
+    /**
+     * Get project build history
+     */
+    getProjectBuilds(projectId: number): Promise<any[]>;
+    /**
+     * Check for duplicate projects before creation
+     */
+    checkForDuplicates(sessionId: string, buildId: string, userId?: number): Promise<any>;
 }

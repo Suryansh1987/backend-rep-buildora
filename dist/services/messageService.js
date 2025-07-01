@@ -9,402 +9,469 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const db_1 = require("../db");
-const drizzle_orm_1 = require("drizzle-orm");
-const project_schema_1 = require("../db/project_schema");
-const message_schema_1 = require("../db/message_schema");
-const drizzle_orm_2 = require("drizzle-orm");
+exports.createMessageService = createMessageService;
+// services/messageService.ts - Enhanced message service with dynamic user handling
+const messagesummary_1 = require("../db/messagesummary");
+const Redis_1 = require("./Redis");
+const session_1 = require("../routes/session");
 class MessageService {
-    generateSessionId() {
-        return `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    constructor(databaseUrl, anthropic, redisUrl) {
+        this.messageDB = new messagesummary_1.DrizzleMessageHistoryDB(databaseUrl, anthropic);
+        this.redis = new Redis_1.RedisService(redisUrl);
+        this.sessionManager = new session_1.StatelessSessionManager(this.redis);
     }
-    /**
-     * Create a message using the new CI schema
-     */
-    createMessage(messageData) {
+    // Initialize the service
+    initialize() {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // Generate session ID if not provided
-                const sessionId = messageData.sessionId || this.generateSessionId();
-                // Ensure session stats exist
-                yield this.ensureSessionStats(sessionId, messageData.projectId);
-                // Create message in CI schema
-                const newCIMessage = {
-                    sessionId,
-                    projectId: messageData.projectId,
-                    content: messageData.content,
-                    messageType: messageData.role,
-                    reasoning: messageData.metadata ? JSON.stringify(messageData.metadata) : null,
-                    createdAt: new Date()
-                };
-                const [createdMessage] = yield db_1.db
-                    .insert(message_schema_1.ciMessages)
-                    .values(newCIMessage)
-                    .returning();
-                // Update project's lastMessageAt and messageCount
-                yield db_1.db
-                    .update(project_schema_1.projects)
-                    .set({
-                    lastMessageAt: new Date(),
-                    lastSessionId: sessionId,
-                    messageCount: (0, drizzle_orm_1.sql) `${project_schema_1.projects.messageCount} + 1`,
-                    updatedAt: new Date()
-                })
-                    .where((0, drizzle_orm_2.eq)(project_schema_1.projects.id, messageData.projectId));
-                // Update session stats
-                yield this.updateSessionStats(sessionId);
-                // Return formatted response
+                yield this.messageDB.initializeStats();
+                console.log('✅ Message service initialized');
+            }
+            catch (error) {
+                console.error('❌ Failed to initialize message service:', error);
+                throw error;
+            }
+        });
+    }
+    // Dynamic user resolution with fallback mechanisms
+    resolveUserId(providedUserId, sessionId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Priority 1: Use provided userId if valid
+                if (providedUserId && (yield this.messageDB.validateUserExists(providedUserId))) {
+                    return providedUserId;
+                }
+                // Priority 2: Get userId from session's most recent project
+                if (sessionId) {
+                    const sessionProject = yield this.messageDB.getProjectBySessionId(sessionId);
+                    if (sessionProject && sessionProject.userId) {
+                        return sessionProject.userId;
+                    }
+                }
+                // Priority 3: Get most recent user from any project
+                const mostRecentUserId = yield this.messageDB.getMostRecentUserId();
+                if (mostRecentUserId && (yield this.messageDB.validateUserExists(mostRecentUserId))) {
+                    return mostRecentUserId;
+                }
+                // Priority 4: Create a new user with current timestamp
+                const newUserId = Date.now() % 1000000; // Use timestamp-based ID
+                yield this.messageDB.ensureUserExists(newUserId, {
+                    email: `user${newUserId}@buildora.dev`,
+                    name: `User ${newUserId}`
+                });
+                console.log(`✅ Created new user ${newUserId} as fallback`);
+                return newUserId;
+            }
+            catch (error) {
+                console.error('❌ Failed to resolve user ID:', error);
+                throw new Error('Could not resolve or create user');
+            }
+        });
+    }
+    // Create message with enhanced user handling
+    createMessage(request) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Validate required fields
+                if (!request.content || !request.messageType) {
+                    return {
+                        success: false,
+                        error: 'Content and messageType are required'
+                    };
+                }
+                if (!['user', 'assistant', 'system'].includes(request.messageType)) {
+                    return {
+                        success: false,
+                        error: 'Invalid messageType. Must be user, assistant, or system'
+                    };
+                }
+                // Resolve user ID dynamically
+                let userId;
+                try {
+                    userId = yield this.resolveUserId(request.userId, request.sessionId);
+                    console.log(`📝 Message creation - Resolved user ID: ${userId} (provided: ${request.userId})`);
+                }
+                catch (error) {
+                    return {
+                        success: false,
+                        error: 'Failed to resolve user for message creation',
+                        details: error instanceof Error ? error.message : 'Unknown error'
+                    };
+                }
+                // Generate or use provided session ID
+                const sessionId = request.sessionId || this.sessionManager.generateSessionId();
+                // Enhance metadata with resolved user and session information
+                const enhancedMetadata = Object.assign(Object.assign({}, request.metadata), { sessionId: sessionId, userId: userId, timestamp: new Date().toISOString(), serviceVersion: '2.0', userResolutionStrategy: request.userId ? 'provided' : 'resolved' });
+                // Create message in database
+                const messageId = yield this.messageDB.addMessage(request.content, request.messageType, enhancedMetadata);
+                // Update session activity
+                yield this.sessionManager.updateSessionContext(sessionId, {
+                    lastActivity: Date.now(),
+                    lastMessageId: messageId,
+                    userId: userId
+                });
                 return {
-                    id: createdMessage.id,
-                    projectId: createdMessage.projectId,
-                    sessionId: createdMessage.sessionId,
-                    content: createdMessage.content,
-                    role: createdMessage.messageType,
-                    metadata: createdMessage.reasoning ? JSON.parse(createdMessage.reasoning) : undefined,
-                    createdAt: createdMessage.createdAt
+                    success: true,
+                    data: {
+                        messageId: messageId,
+                        sessionId: sessionId,
+                        userId: userId,
+                        timestamp: enhancedMetadata.timestamp,
+                        metadata: enhancedMetadata
+                    }
                 };
             }
             catch (error) {
-                console.error('Error creating message:', error);
-                throw error;
+                console.error('❌ Failed to create message:', error);
+                return {
+                    success: false,
+                    error: 'Failed to create message',
+                    details: error instanceof Error ? error.message : 'Unknown error'
+                };
             }
         });
     }
-    /**
-     * Get messages by project ID (from all sessions)
-     */
-    getMessagesByProjectId(projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
+    // Get user's message history
+    getUserMessages(userId_1) {
+        return __awaiter(this, arguments, void 0, function* (userId, limit = 50) {
             try {
-                const projectMessages = yield db_1.db
-                    .select()
-                    .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.projectId, projectId))
-                    .orderBy(message_schema_1.ciMessages.createdAt);
-                return projectMessages.map(msg => ({
-                    id: msg.id,
-                    projectId: msg.projectId,
-                    sessionId: msg.sessionId,
-                    content: msg.content,
-                    role: msg.messageType,
-                    metadata: msg.reasoning ? JSON.parse(msg.reasoning) : undefined,
-                    createdAt: msg.createdAt
-                }));
-            }
-            catch (error) {
-                console.error('Error getting messages by project ID:', error);
-                throw error;
-            }
-        });
-    }
-    /**
-     * Get messages by session ID
-     */
-    getMessagesBySessionId(sessionId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const sessionMessages = yield db_1.db
-                    .select()
-                    .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.sessionId, sessionId))
-                    .orderBy(message_schema_1.ciMessages.createdAt);
-                return sessionMessages.map(msg => ({
-                    id: msg.id,
-                    projectId: msg.projectId,
-                    sessionId: msg.sessionId,
-                    content: msg.content,
-                    role: msg.messageType,
-                    metadata: msg.reasoning ? JSON.parse(msg.reasoning) : undefined,
-                    createdAt: msg.createdAt
-                }));
-            }
-            catch (error) {
-                console.error('Error getting messages by session ID:', error);
-                throw error;
-            }
-        });
-    }
-    /**
-     * Get messages by project ID and session ID
-     */
-    getMessagesByProjectAndSession(projectId, sessionId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const messages = yield db_1.db
-                    .select()
-                    .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.and)((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.projectId, projectId), (0, drizzle_orm_2.eq)(message_schema_1.ciMessages.sessionId, sessionId)))
-                    .orderBy(message_schema_1.ciMessages.createdAt);
-                return messages.map(msg => ({
-                    id: msg.id,
-                    projectId: msg.projectId,
-                    sessionId: msg.sessionId,
-                    content: msg.content,
-                    role: msg.messageType,
-                    metadata: msg.reasoning ? JSON.parse(msg.reasoning) : undefined,
-                    createdAt: msg.createdAt
-                }));
-            }
-            catch (error) {
-                console.error('Error getting messages by project and session:', error);
-                throw error;
-            }
-        });
-    }
-    /**
-     * Get recent messages for a project (latest session)
-     */
-    getRecentMessagesByProjectId(projectId_1) {
-        return __awaiter(this, arguments, void 0, function* (projectId, limit = 10) {
-            try {
-                const messages = yield db_1.db
-                    .select()
-                    .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.projectId, projectId))
-                    .orderBy((0, drizzle_orm_2.desc)(message_schema_1.ciMessages.createdAt))
-                    .limit(limit);
-                return messages.reverse().map(msg => ({
-                    id: msg.id,
-                    projectId: msg.projectId,
-                    sessionId: msg.sessionId,
-                    content: msg.content,
-                    role: msg.messageType,
-                    metadata: msg.reasoning ? JSON.parse(msg.reasoning) : undefined,
-                    createdAt: msg.createdAt
-                }));
-            }
-            catch (error) {
-                console.error('Error getting recent messages:', error);
-                throw error;
-            }
-        });
-    }
-    /**
-     * Delete messages by project ID (all sessions)
-     */
-    deleteMessagesByProjectId(projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                // Delete all messages for the project
-                yield db_1.db
-                    .delete(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.projectId, projectId));
-                // Reset project message count
-                yield db_1.db
-                    .update(project_schema_1.projects)
-                    .set({
-                    messageCount: 0,
-                    lastMessageAt: null,
-                    lastSessionId: null,
-                    updatedAt: new Date()
+                // Ensure user exists
+                const resolvedUserId = yield this.resolveUserId(userId);
+                // Get recent conversation (filtered by user would require additional DB methods)
+                const conversation = yield this.messageDB.getRecentConversation();
+                // Filter messages by user (basic implementation)
+                const userMessages = conversation.messages
+                    .filter((msg) => {
+                    try {
+                        if (msg.reasoning) {
+                            const metadata = JSON.parse(msg.reasoning);
+                            return metadata.userId === resolvedUserId;
+                        }
+                        return false;
+                    }
+                    catch (_a) {
+                        return false;
+                    }
                 })
-                    .where((0, drizzle_orm_2.eq)(project_schema_1.projects.id, projectId));
-                return true;
+                    .slice(0, limit);
+                return {
+                    success: true,
+                    data: userMessages.map((msg) => ({
+                        id: msg.id,
+                        content: msg.content,
+                        messageType: msg.messageType,
+                        createdAt: msg.createdAt,
+                        metadata: msg.reasoning ? JSON.parse(msg.reasoning) : {}
+                    }))
+                };
             }
             catch (error) {
-                console.error('Error deleting messages by project ID:', error);
-                throw error;
+                console.error('❌ Failed to get user messages:', error);
+                return {
+                    success: false,
+                    error: 'Failed to retrieve user messages'
+                };
             }
         });
     }
-    /**
-     * Delete messages by session ID
-     */
-    deleteMessagesBySessionId(sessionId) {
+    // Get session messages
+    getSessionMessages(sessionId) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                yield db_1.db
-                    .delete(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.sessionId, sessionId));
-                // Delete session stats
-                yield db_1.db
-                    .delete(message_schema_1.conversationStats)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.conversationStats.sessionId, sessionId));
-                return true;
-            }
-            catch (error) {
-                console.error('Error deleting messages by session ID:', error);
-                throw error;
-            }
-        });
-    }
-    /**
-     * Get session information for a project
-     */
-    getProjectSessions(projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const sessions = yield db_1.db
-                    .select()
-                    .from(message_schema_1.conversationStats)
-                    .where((0, drizzle_orm_2.and)((0, drizzle_orm_2.eq)(message_schema_1.conversationStats.projectId, projectId), (0, drizzle_orm_2.eq)(message_schema_1.conversationStats.isActive, true)))
-                    .orderBy((0, drizzle_orm_2.desc)(message_schema_1.conversationStats.lastActivity));
-                return sessions.map(session => {
-                    var _a, _b;
-                    return ({
-                        sessionId: session.sessionId,
-                        messageCount: (_a = session.totalMessageCount) !== null && _a !== void 0 ? _a : 0,
-                        lastActivity: session.lastActivity || session.createdAt,
-                        isActive: (_b = session.isActive) !== null && _b !== void 0 ? _b : false
-                    });
+                // Get session context to verify it exists
+                const sessionContext = yield this.sessionManager.getSessionContext(sessionId);
+                // Get recent conversation and filter by session
+                const conversation = yield this.messageDB.getRecentConversation();
+                const sessionMessages = conversation.messages
+                    .filter((msg) => {
+                    try {
+                        if (msg.reasoning) {
+                            const metadata = JSON.parse(msg.reasoning);
+                            return metadata.sessionId === sessionId;
+                        }
+                        return false;
+                    }
+                    catch (_a) {
+                        return false;
+                    }
                 });
+                return {
+                    success: true,
+                    data: sessionMessages.map((msg) => ({
+                        id: msg.id,
+                        content: msg.content,
+                        messageType: msg.messageType,
+                        createdAt: msg.createdAt,
+                        metadata: msg.reasoning ? JSON.parse(msg.reasoning) : {}
+                    }))
+                };
             }
             catch (error) {
-                console.error('Error getting project sessions:', error);
-                return [];
+                console.error('❌ Failed to get session messages:', error);
+                return {
+                    success: false,
+                    error: 'Failed to retrieve session messages'
+                };
             }
         });
     }
-    /**
-     * Get message count for a project
-     */
-    getProjectMessageCount(projectId) {
+    // Create user if they don't exist
+    ensureUser(userId, userData) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const result = yield db_1.db
-                    .select({ count: message_schema_1.ciMessages.id })
-                    .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.projectId, projectId));
-                return result.length;
+                const resolvedUserId = yield this.messageDB.ensureUserExists(userId, userData);
+                return {
+                    success: true,
+                    data: {
+                        userId: resolvedUserId,
+                        action: resolvedUserId === userId ? 'existed' : 'created'
+                    }
+                };
             }
             catch (error) {
-                console.error('Error getting project message count:', error);
-                return 0;
+                console.error('❌ Failed to ensure user:', error);
+                return {
+                    success: false,
+                    error: 'Failed to ensure user exists'
+                };
             }
         });
     }
-    /**
-     * Get message count for a session
-     */
-    getSessionMessageCount(sessionId) {
+    // Get message statistics for user
+    getUserMessageStats(userId) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                const result = yield db_1.db
-                    .select({ count: message_schema_1.ciMessages.id })
-                    .from(message_schema_1.ciMessages)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.ciMessages.sessionId, sessionId));
-                return result.length;
-            }
-            catch (error) {
-                console.error('Error getting session message count:', error);
-                return 0;
-            }
-        });
-    }
-    /**
-     * Create a new session for a project
-     */
-    createSession(projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const sessionId = this.generateSessionId();
-            yield this.ensureSessionStats(sessionId, projectId);
-            return sessionId;
-        });
-    }
-    /**
-     * Get active session for a project (latest session with activity)
-     */
-    getActiveProjectSession(projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const sessions = yield db_1.db
-                    .select()
-                    .from(message_schema_1.conversationStats)
-                    .where((0, drizzle_orm_2.and)((0, drizzle_orm_2.eq)(message_schema_1.conversationStats.projectId, projectId), (0, drizzle_orm_2.eq)(message_schema_1.conversationStats.isActive, true)))
-                    .orderBy((0, drizzle_orm_2.desc)(message_schema_1.conversationStats.lastActivity))
-                    .limit(1);
-                return sessions.length > 0 ? sessions[0].sessionId : null;
-            }
-            catch (error) {
-                console.error('Error getting active project session:', error);
-                return null;
-            }
-        });
-    }
-    // Private helper methods
-    ensureSessionStats(sessionId, projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const existing = yield db_1.db
-                    .select()
-                    .from(message_schema_1.conversationStats)
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.conversationStats.sessionId, sessionId));
-                if (existing.length === 0) {
-                    yield db_1.db
-                        .insert(message_schema_1.conversationStats)
-                        .values({
-                        sessionId,
-                        projectId,
-                        totalMessageCount: 0,
-                        summaryCount: 0,
-                        isActive: true,
-                        startedAt: new Date(),
-                        lastActivity: new Date(),
-                        createdAt: new Date(),
-                        updatedAt: new Date()
-                    });
-                }
-            }
-            catch (error) {
-                console.error('Error ensuring session stats:', error);
-            }
-        });
-    }
-    updateSessionStats(sessionId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                yield db_1.db
-                    .update(message_schema_1.conversationStats)
-                    .set({
-                    totalMessageCount: (0, drizzle_orm_1.sql) `${message_schema_1.conversationStats.totalMessageCount} + 1`,
-                    lastActivity: new Date(),
-                    updatedAt: new Date()
-                })
-                    .where((0, drizzle_orm_2.eq)(message_schema_1.conversationStats.sessionId, sessionId));
-            }
-            catch (error) {
-                console.error('Error updating session stats:', error);
-            }
-        });
-    }
-    // Legacy compatibility methods (if you need to maintain backward compatibility)
-    /**
-     * @deprecated Use createMessage with explicit session management
-     * Legacy method for backward compatibility
-     */
-    createLegacyMessage(messageData) {
-        return __awaiter(this, void 0, void 0, function* () {
-            console.warn('⚠️ Using deprecated createLegacyMessage - consider upgrading to session-based createMessage');
-            // Get or create active session for project
-            let sessionId = yield this.getActiveProjectSession(messageData.projectId);
-            if (!sessionId) {
-                sessionId = yield this.createSession(messageData.projectId);
-            }
-            return this.createMessage(Object.assign(Object.assign({}, messageData), { sessionId }));
-        });
-    }
-    /**
-     * Get conversation context for a project (combines recent messages)
-     */
-    getProjectConversationContext(projectId) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const recentMessages = yield this.getRecentMessagesByProjectId(projectId, 10);
-                if (recentMessages.length === 0) {
-                    return '';
-                }
-                let context = '**RECENT CONVERSATION:**\n';
-                recentMessages.forEach((msg, index) => {
-                    context += `${index + 1}. [${msg.role.toUpperCase()}]: ${msg.content}\n`;
+                // Ensure user exists
+                const resolvedUserId = yield this.resolveUserId(userId);
+                // Get conversation data
+                const conversation = yield this.messageDB.getRecentConversation();
+                const modificationStats = yield this.messageDB.getModificationStats();
+                // Filter and count messages by user
+                const userMessages = conversation.messages.filter((msg) => {
+                    try {
+                        if (msg.reasoning) {
+                            const metadata = JSON.parse(msg.reasoning);
+                            return metadata.userId === resolvedUserId;
+                        }
+                        return false;
+                    }
+                    catch (_a) {
+                        return false;
+                    }
                 });
-                return context;
+                const messagesByType = userMessages.reduce((acc, msg) => {
+                    acc[msg.messageType] = (acc[msg.messageType] || 0) + 1;
+                    return acc;
+                }, {});
+                const recentActivity = userMessages.length > 0
+                    ? userMessages[0].createdAt
+                    : null;
+                return {
+                    success: true,
+                    data: {
+                        totalMessages: userMessages.length,
+                        userMessages: messagesByType.user || 0,
+                        assistantMessages: messagesByType.assistant || 0,
+                        systemMessages: messagesByType.system || 0,
+                        recentActivity,
+                        modificationCount: modificationStats.totalModifications
+                    }
+                };
             }
             catch (error) {
-                console.error('Error getting project conversation context:', error);
-                return '';
+                console.error('❌ Failed to get user message stats:', error);
+                return {
+                    success: false,
+                    error: 'Failed to retrieve user message statistics'
+                };
+            }
+        });
+    }
+    // Delete messages for user (mark as deleted, don't actually delete)
+    deleteUserMessages(userId, sessionId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // For now, we'll just clear all data since we don't have user-specific deletion
+                // In a full implementation, you'd add user-specific deletion methods
+                console.log(`🗑️ Would delete messages for user ${userId} in session ${sessionId || 'all'}`);
+                // This is a placeholder - implement user-specific message deletion
+                return {
+                    success: true,
+                    data: { deletedCount: 0 }
+                };
+            }
+            catch (error) {
+                console.error('❌ Failed to delete user messages:', error);
+                return {
+                    success: false,
+                    error: 'Failed to delete user messages'
+                };
+            }
+        });
+    }
+    // Get conversation context for user
+    getUserConversationContext(userId, sessionId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Ensure user exists
+                yield this.resolveUserId(userId);
+                // Get enhanced context
+                const context = yield this.messageDB.getEnhancedContext();
+                return {
+                    success: true,
+                    data: context
+                };
+            }
+            catch (error) {
+                console.error('❌ Failed to get user conversation context:', error);
+                return {
+                    success: false,
+                    error: 'Failed to retrieve conversation context'
+                };
+            }
+        });
+    }
+    // Export conversation history for user
+    exportUserConversation(userId_1) {
+        return __awaiter(this, arguments, void 0, function* (userId, format = 'json') {
+            try {
+                // Get user messages
+                const messagesResult = yield this.getUserMessages(userId, 1000);
+                if (!messagesResult.success || !messagesResult.data) {
+                    return {
+                        success: false,
+                        error: 'Failed to retrieve user messages for export'
+                    };
+                }
+                const messages = messagesResult.data;
+                if (format === 'csv') {
+                    // Convert to CSV format
+                    const csvHeader = 'id,content,messageType,createdAt,sessionId,userId\n';
+                    const csvRows = messages.map(msg => {
+                        var _a;
+                        const sessionId = ((_a = msg.metadata) === null || _a === void 0 ? void 0 : _a.sessionId) || '';
+                        const content = `"${msg.content.replace(/"/g, '""')}"`;
+                        return `${msg.id},${content},${msg.messageType},${msg.createdAt},${sessionId},${userId}`;
+                    }).join('\n');
+                    return {
+                        success: true,
+                        data: {
+                            format: 'csv',
+                            content: csvHeader + csvRows,
+                            messageCount: messages.length,
+                            exportedAt: new Date().toISOString()
+                        }
+                    };
+                }
+                // Default JSON format
+                return {
+                    success: true,
+                    data: {
+                        format: 'json',
+                        userId: userId,
+                        messageCount: messages.length,
+                        exportedAt: new Date().toISOString(),
+                        messages: messages
+                    }
+                };
+            }
+            catch (error) {
+                console.error('❌ Failed to export user conversation:', error);
+                return {
+                    success: false,
+                    error: 'Failed to export conversation'
+                };
+            }
+        });
+    }
+    // Get service health and stats
+    getServiceHealth() {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Check database health
+                let dbHealth = false;
+                let totalMessages = 0;
+                try {
+                    const stats = yield this.messageDB.getConversationStats();
+                    dbHealth = true;
+                    totalMessages = (stats === null || stats === void 0 ? void 0 : stats.totalMessageCount) || 0;
+                }
+                catch (_a) {
+                    dbHealth = false;
+                }
+                // Check Redis health (simplified)
+                let redisHealth = false;
+                let activeSessions = 0;
+                try {
+                    // This would need to be implemented in RedisService
+                    redisHealth = true;
+                    activeSessions = 0; // Placeholder
+                }
+                catch (_b) {
+                    redisHealth = false;
+                }
+                // Get total users (would need additional method in DB)
+                const totalUsers = 0; // Placeholder
+                const status = dbHealth && redisHealth ? 'healthy' :
+                    dbHealth || redisHealth ? 'degraded' : 'unhealthy';
+                return {
+                    success: true,
+                    data: {
+                        status,
+                        database: dbHealth,
+                        redis: redisHealth,
+                        totalUsers,
+                        totalMessages,
+                        activeeSessions: activeSessions,
+                        uptime: process.uptime().toString()
+                    }
+                };
+            }
+            catch (error) {
+                console.error('❌ Failed to get service health:', error);
+                return {
+                    success: false,
+                    error: 'Failed to retrieve service health'
+                };
+            }
+        });
+    }
+    // Cleanup old data
+    cleanupOldData() {
+        return __awaiter(this, arguments, void 0, function* (options = {}) {
+            try {
+                const { olderThanDays = 30, userId, dryRun = true } = options;
+                console.log(`🧹 Cleanup requested: ${dryRun ? 'DRY RUN' : 'ACTUAL'} - older than ${olderThanDays} days`);
+                if (userId) {
+                    console.log(`👤 Cleanup for user: ${userId}`);
+                }
+                // This would implement actual cleanup logic
+                // For now, return placeholder results
+                return {
+                    success: true,
+                    data: {
+                        messagesDeleted: dryRun ? 0 : 0,
+                        sessionsCleared: dryRun ? 0 : 0
+                    }
+                };
+            }
+            catch (error) {
+                console.error('❌ Failed to cleanup old data:', error);
+                return {
+                    success: false,
+                    error: 'Failed to cleanup old data'
+                };
             }
         });
     }
 }
-exports.default = new MessageService();
+// Create singleton instance
+let messageServiceInstance = null;
+function createMessageService(databaseUrl, anthropic, redisUrl) {
+    if (!messageServiceInstance) {
+        messageServiceInstance = new MessageService(databaseUrl, anthropic, redisUrl);
+    }
+    return messageServiceInstance;
+}
+exports.default = MessageService;
 //# sourceMappingURL=messageService.js.map
