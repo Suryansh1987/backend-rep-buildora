@@ -78,11 +78,10 @@ export function initializeGenerationRoutes(
   // Initialize Enhanced Project URL Manager
   const projectUrlManager = new EnhancedProjectUrlManager(messageDB);
 
-  // MAIN GENERATION ENDPOINT with enhanced project identification
+  // MAIN GENERATION ENDPOINT - Creates new projects only
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     const { 
       prompt, 
-      projectId,       // Optional: Link to existing project
       userId,          // User ID from authentication
       projectName,     // Optional: Custom project name
       framework,       // Optional: Framework (default: react)
@@ -101,8 +100,8 @@ export function initializeGenerationRoutes(
     const buildId = uuidv4();
     const sessionId = sessionManager.generateSessionId();
     
-    console.log(`[${buildId}] Starting generation pipeline`);
-    console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}, Project: ${projectId}`);
+    console.log(`[${buildId}] Starting new project generation pipeline`);
+    console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}`);
     console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
     
     const cleanupTimer = setTimeout(() => {
@@ -137,7 +136,6 @@ export function initializeGenerationRoutes(
         requestType: 'user_prompt',
         timestamp: new Date().toISOString(),
         sessionId: sessionId,
-        projectId: projectId,
         userId: userId
       } as any);
 
@@ -437,15 +435,15 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
       console.log(`[${buildId}] 🚀 Deploying with Azure Static Web Apps...`);
       const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
-      // ENHANCED URL SAVING TO PROJECTS TABLE
-      console.log(`[${buildId}] 💾 Saving deployment URLs with enhanced identification...`);
+      // CREATE NEW PROJECT RECORD
+      console.log(`[${buildId}] 💾 Creating new project record...`);
       
       const urlResult = await projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
         deploymentUrl: previewUrl as string,
         downloadUrl: urls.downloadUrl,
         zipUrl: zipUrl
       }, {
-        projectId: projectId,                         // Optional project linking
+        projectId: undefined,                         // No existing project for new generation
         userId: userId,                               // User ID from auth
         isModification: false,                        // This is new generation
         prompt: prompt,
@@ -455,7 +453,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         template: template || 'vite-react-ts'
       });
 
-      console.log(`[${buildId}] ✅ Project URLs ${urlResult.action} - Project ID: ${urlResult.projectId}`);
+      console.log(`[${buildId}] ✅ New project created - Project ID: ${urlResult.projectId}`);
 
       // Save project summary to database (for backwards compatibility)
       try {
@@ -519,8 +517,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         zipUrl: zipUrl,
         buildId: buildId,
         sessionId: sessionId,
-        projectId: urlResult.projectId,               // NEW: Return created/updated project ID
-        projectAction: urlResult.action,              // NEW: 'created' or 'updated'
+        projectId: urlResult.projectId,               // Return created project ID
+        projectAction: 'created',                     // Always 'created' for new generation
         hosting: "Azure Static Web Apps",
         features: [
           "Global CDN",
@@ -537,7 +535,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`,
           databaseSaved: true,
           projectUrlsSaved: true,
-          identificationStrategy: urlResult.action === 'created' ? 'new_project_creation' : 'project_update',
+          identificationStrategy: 'new_project_creation',
           userProvided: {
             userId: userId,
             projectName: projectName,

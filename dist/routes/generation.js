@@ -122,11 +122,10 @@ function cleanupTempDirectory(buildId) {
 function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
     // Initialize Enhanced Project URL Manager
     const projectUrlManager = new url_manager_1.EnhancedProjectUrlManager(messageDB);
-    // MAIN GENERATION ENDPOINT with enhanced project identification
+    // MAIN GENERATION ENDPOINT - Creates new projects only
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b;
-        const { prompt, projectId, // Optional: Link to existing project
-        userId, // User ID from authentication
+        const { prompt, userId, // User ID from authentication
         projectName, // Optional: Custom project name
         framework, // Optional: Framework (default: react)
         template, // Optional: Template (default: vite-react-ts)
@@ -141,8 +140,8 @@ function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
         }
         const buildId = (0, uuid_1.v4)();
         const sessionId = sessionManager.generateSessionId();
-        console.log(`[${buildId}] Starting generation pipeline`);
-        console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}, Project: ${projectId}`);
+        console.log(`[${buildId}] Starting new project generation pipeline`);
+        console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}`);
         console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
         const cleanupTimer = setTimeout(() => {
             cleanupTempDirectory(buildId);
@@ -170,7 +169,6 @@ function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
                 requestType: 'user_prompt',
                 timestamp: new Date().toISOString(),
                 sessionId: sessionId,
-                projectId: projectId,
                 userId: userId
             });
             console.log(`[${buildId}] 🔨 Generating frontend code using Claude...`);
@@ -420,14 +418,14 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
             // Deploy using the new deployment method
             console.log(`[${buildId}] 🚀 Deploying with Azure Static Web Apps...`);
             const previewUrl = yield (0, azure_deploy_1.runBuildAndDeploy)(builtZipUrl, buildId);
-            // ENHANCED URL SAVING TO PROJECTS TABLE
-            console.log(`[${buildId}] 💾 Saving deployment URLs with enhanced identification...`);
+            // CREATE NEW PROJECT RECORD
+            console.log(`[${buildId}] 💾 Creating new project record...`);
             const urlResult = yield projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
                 deploymentUrl: previewUrl,
                 downloadUrl: urls.downloadUrl,
                 zipUrl: zipUrl
             }, {
-                projectId: projectId, // Optional project linking
+                projectId: undefined, // No existing project for new generation
                 userId: userId, // User ID from auth
                 isModification: false, // This is new generation
                 prompt: prompt,
@@ -436,7 +434,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                 framework: framework || 'react',
                 template: template || 'vite-react-ts'
             });
-            console.log(`[${buildId}] ✅ Project URLs ${urlResult.action} - Project ID: ${urlResult.projectId}`);
+            console.log(`[${buildId}] ✅ New project created - Project ID: ${urlResult.projectId}`);
             // Save project summary to database (for backwards compatibility)
             try {
                 const summaryId = yield messageDB.saveProjectSummary(projectSummary, prompt, zipUrl, buildId);
@@ -487,8 +485,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                 zipUrl: zipUrl,
                 buildId: buildId,
                 sessionId: sessionId,
-                projectId: urlResult.projectId, // NEW: Return created/updated project ID
-                projectAction: urlResult.action, // NEW: 'created' or 'updated'
+                projectId: urlResult.projectId, // Return created project ID
+                projectAction: 'created', // Always 'created' for new generation
                 hosting: "Azure Static Web Apps",
                 features: [
                     "Global CDN",
@@ -505,7 +503,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                     generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`,
                     databaseSaved: true,
                     projectUrlsSaved: true,
-                    identificationStrategy: urlResult.action === 'created' ? 'new_project_creation' : 'project_update',
+                    identificationStrategy: 'new_project_creation',
                     userProvided: {
                         userId: userId,
                         projectName: projectName,
