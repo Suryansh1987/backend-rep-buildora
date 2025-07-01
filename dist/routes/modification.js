@@ -46,9 +46,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeModificationRoutes = initializeModificationRoutes;
-// routes/modification.ts - Updated with dynamic user handling and improved error handling
+// routes/modification.ts - Updated with Enhanced URL Manager and improved duplicate prevention
 const express_1 = __importDefault(require("express"));
 const filemodifier_1 = require("../services/filemodifier");
+const url_manager_1 = require("../db/url-manager");
 const uuid_1 = require("uuid");
 const adm_zip_1 = __importDefault(require("adm-zip"));
 const axios_1 = __importDefault(require("axios"));
@@ -65,8 +66,6 @@ class StatelessConversationHelper {
     saveModification(sessionId, modification) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
-            // Save to database (persistent)
-            yield this.messageDB.saveModification(modification);
             // Save to Redis session state (fast access) - using proper ModificationChange interface
             const change = {
                 type: 'modified',
@@ -120,59 +119,6 @@ class StatelessConversationHelper {
         });
     }
 }
-// IMPROVED URL MANAGEMENT FUNCTION WITH DYNAMIC USER HANDLING
-function saveProjectUrlsByUserId(messageDB, userId, buildId, urls, sessionId, prompt) {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            console.log(`📊 Dynamic URL Management - User: ${userId}, Build: ${buildId}`);
-            // First, ensure the user exists in the database
-            yield messageDB.ensureUserExists(userId);
-            // Get user's most recent project
-            const userProjects = yield messageDB.getUserProjects(userId);
-            if (userProjects.length > 0) {
-                // Update the most recent project
-                const project = userProjects[0]; // Most recent project
-                yield messageDB.updateProjectUrls(project.id, {
-                    deploymentUrl: urls.deploymentUrl,
-                    downloadUrl: urls.downloadUrl,
-                    zipUrl: urls.zipUrl,
-                    buildId: buildId,
-                    status: 'ready',
-                    lastSessionId: sessionId,
-                    lastMessageAt: new Date(),
-                    updatedAt: new Date()
-                });
-                console.log(`✅ Updated existing project ${project.id} for user ${userId}`);
-                return { projectId: project.id, action: 'updated' };
-            }
-            else {
-                // Create new project for user
-                const projectId = yield messageDB.createProject({
-                    userId: userId,
-                    name: `Project ${buildId.slice(0, 8)}`,
-                    description: (prompt === null || prompt === void 0 ? void 0 : prompt.substring(0, 200)) || 'Auto-generated from modification',
-                    status: 'ready',
-                    projectType: 'frontend',
-                    deploymentUrl: urls.deploymentUrl,
-                    downloadUrl: urls.downloadUrl,
-                    zipUrl: urls.zipUrl,
-                    buildId: buildId,
-                    lastSessionId: sessionId,
-                    framework: 'react',
-                    template: 'vite-react-ts',
-                    lastMessageAt: new Date(),
-                    messageCount: 1
-                });
-                console.log(`✅ Created new project ${projectId} for user ${userId}`);
-                return { projectId, action: 'created' };
-            }
-        }
-        catch (error) {
-            console.error('❌ Failed to save project URLs:', error);
-            throw error;
-        }
-    });
-}
 // FALLBACK USER RESOLUTION FUNCTION
 function resolveUserId(messageDB, providedUserId, sessionId) {
     return __awaiter(this, void 0, void 0, function* () {
@@ -194,7 +140,7 @@ function resolveUserId(messageDB, providedUserId, sessionId) {
                 return mostRecentUserId;
             }
             // Priority 4: Create a new user with current timestamp
-            const newUserId = Date.now() % 1000000; // Use timestamp-based ID
+            const newUserId = Date.now() % 1000000;
             yield messageDB.ensureUserExists(newUserId, {
                 email: `user${newUserId}@buildora.dev`,
                 name: `User ${newUserId}`
@@ -208,7 +154,35 @@ function resolveUserId(messageDB, providedUserId, sessionId) {
         }
     });
 }
-// Utility functions (unchanged)
+// SIMPLIFIED PROJECT RESOLUTION - Gets current project ID for updates (NO EXPLICIT PROJECT ID)
+function resolveCurrentProject(messageDB, urlManager, userId, sessionId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            // Priority 1: Get user's most recent project
+            const userProjects = yield messageDB.getUserProjects(userId);
+            if (userProjects.length > 0) {
+                const recentProject = userProjects[0]; // Most recent project
+                console.log(`✅ Using user's most recent project: ${recentProject.id}`);
+                return { projectId: recentProject.id, project: recentProject };
+            }
+            // Priority 2: Check session for project
+            if (sessionId) {
+                const sessionProject = yield messageDB.getProjectBySessionId(sessionId);
+                if (sessionProject) {
+                    console.log(`✅ Using session project: ${sessionProject.id}`);
+                    return { projectId: sessionProject.id, project: sessionProject };
+                }
+            }
+            console.log(`⚠️ No current project found for user ${userId}`);
+            return { projectId: null, project: null };
+        }
+        catch (error) {
+            console.error('❌ Failed to resolve current project:', error);
+            return { projectId: null, project: null };
+        }
+    });
+}
+// Utility functions
 function downloadAndExtractProject(buildId, zipUrl) {
     return __awaiter(this, void 0, void 0, function* () {
         const tempBuildDir = path_1.default.join(__dirname, "../../temp-builds", buildId);
@@ -252,11 +226,11 @@ function cleanupTempDirectory(buildId) {
 // Initialize routes with dependencies
 function initializeModificationRoutes(anthropic, messageDB, redis, sessionManager) {
     const conversationHelper = new StatelessConversationHelper(messageDB, redis);
-    // STATELESS STREAMING MODIFICATION ENDPOINT WITH DYNAMIC USER HANDLING
+    const urlManager = new url_manager_1.EnhancedProjectUrlManager(messageDB);
+    // STATELESS STREAMING MODIFICATION ENDPOINT
     router.post("/stream", (req, res) => __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d, _e, _f;
-        const { prompt, sessionId: clientSessionId, userId: providedUserId // This can be undefined, null, or a number
-         } = req.body;
+        var _a, _b, _c, _d, _e;
+        const { prompt, sessionId: clientSessionId, userId: providedUserId } = req.body;
         if (!prompt) {
             res.status(400).json({
                 success: false,
@@ -302,32 +276,35 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
         }, 5 * 60 * 1000);
         try {
             sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
+            // RESOLVE CURRENT PROJECT ID FOR UPDATING
+            const { projectId: currentProjectId, project: currentProject } = yield resolveCurrentProject(messageDB, urlManager, userId, sessionId);
             let sessionContext = yield sessionManager.getSessionContext(sessionId);
             let tempBuildDir = '';
-            let userProject = null;
-            const userProjects = yield messageDB.getUserProjects(userId);
-            if (userProjects.length > 0) {
-                userProject = userProjects[0];
-                if (userProject.zipUrl) {
-                    sendEvent('progress', { step: 2, total: 16, message: `Found user's project: ${userProject.name}. Downloading...`, buildId, sessionId });
-                    tempBuildDir = yield downloadAndExtractProject(buildId, userProject.zipUrl);
+            let userProject = currentProject;
+            // Enhanced project resolution using URL manager
+            if (currentProjectId) {
+                sendEvent('progress', { step: 2, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
+                const projectUrls = yield urlManager.getProjectUrls({ projectId: currentProjectId });
+                if (projectUrls && projectUrls.zipUrl) {
+                    tempBuildDir = yield downloadAndExtractProject(buildId, projectUrls.zipUrl);
                     sessionContext = {
                         buildId,
                         tempBuildDir,
                         projectSummary: {
-                            summary: userProject.description || 'User project',
-                            zipUrl: userProject.zipUrl,
-                            buildId: userProject.buildId
+                            summary: (currentProject === null || currentProject === void 0 ? void 0 : currentProject.description) || 'Project modification',
+                            zipUrl: projectUrls.zipUrl,
+                            buildId: projectUrls.buildId
                         },
                         lastActivity: Date.now()
                     };
                     yield sessionManager.saveSessionContext(sessionId, sessionContext);
                 }
             }
-            if (!sessionContext || !((_a = sessionContext.projectSummary) === null || _a === void 0 ? void 0 : _a.zipUrl)) {
-                sendEvent('progress', { step: 2, total: 16, message: 'No user project found. Checking Redis...', buildId, sessionId });
+            else {
+                // Fallback logic
+                sendEvent('progress', { step: 2, total: 16, message: 'No current project found. Checking Redis...', buildId, sessionId });
                 sessionContext = yield sessionManager.getSessionContext(sessionId);
-                if ((_b = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _b === void 0 ? void 0 : _b.zipUrl) {
+                if ((_a = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _a === void 0 ? void 0 : _a.zipUrl) {
                     tempBuildDir = yield downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
                 }
                 else {
@@ -360,7 +337,6 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     }
                 }
             }
-            // ✅ Now tempBuildDir is guaranteed to be defined
             sendEvent('progress', { step: 3, total: 16, message: 'Project environment ready!', buildId, sessionId });
             yield sessionManager.updateSessionContext(sessionId, {
                 buildId,
@@ -375,14 +351,14 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('progress', { step: 4, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
                 }
             }
-            catch (_g) {
+            catch (_f) {
                 sendEvent('progress', { step: 4, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
             }
             const fileModifier = new filemodifier_1.StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
             fileModifier.setStreamCallback((message) => sendEvent('progress', { step: 7, total: 16, message, buildId, sessionId }));
             sendEvent('progress', { step: 5, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
             const startTime = Date.now();
-            const result = yield fileModifier.processModification(enhancedPrompt, undefined, (_c = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _c === void 0 ? void 0 : _c.summary, (summary, prompt) => __awaiter(this, void 0, void 0, function* () {
+            const result = yield fileModifier.processModification(enhancedPrompt, undefined, (_b = sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) === null || _b === void 0 ? void 0 : _b.summary, (summary, prompt) => __awaiter(this, void 0, void 0, function* () {
                 try {
                     const summaryId = yield messageDB.saveProjectSummary(summary, prompt, "", buildId, userId);
                     console.log(`💾 Saved project summary, ID: ${summaryId}`);
@@ -425,12 +401,40 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                             yield messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
                         }
                     }
-                    sendEvent('progress', { step: 13, total: 16, message: 'Saving URLs...', buildId, sessionId });
-                    const urlResult = yield saveProjectUrlsByUserId(messageDB, userId, buildId, {
-                        deploymentUrl: previewUrl,
-                        downloadUrl: urls.downloadUrl,
-                        zipUrl
-                    }, sessionId, prompt);
+                    sendEvent('progress', { step: 13, total: 16, message: 'Updating project URLs...', buildId, sessionId });
+                    // USE ENHANCED URL MANAGER - UPDATE EXISTING PROJECT
+                    let urlResult = { action: 'no_project_to_update', projectId: null };
+                    if (currentProjectId) {
+                        try {
+                            const updatedProjectId = yield urlManager.saveNewProjectUrls(sessionId, currentProjectId, {
+                                deploymentUrl: previewUrl,
+                                downloadUrl: urls.downloadUrl,
+                                zipUrl
+                            }, userId, {
+                                name: userProject === null || userProject === void 0 ? void 0 : userProject.name,
+                                description: userProject === null || userProject === void 0 ? void 0 : userProject.description,
+                                framework: (userProject === null || userProject === void 0 ? void 0 : userProject.framework) || 'react',
+                                template: (userProject === null || userProject === void 0 ? void 0 : userProject.template) || 'vite-react-ts'
+                            });
+                            urlResult = {
+                                action: 'updated',
+                                projectId: updatedProjectId,
+                                skipReason: null
+                            };
+                            console.log(`[${buildId}] ✅ Updated existing project: ${updatedProjectId}`);
+                        }
+                        catch (updateError) {
+                            console.error(`[${buildId}] ❌ Failed to update project URLs:`, updateError);
+                            urlResult = {
+                                action: 'update_failed',
+                                projectId: currentProjectId,
+                                error: updateError instanceof Error ? updateError.message : 'Unknown error'
+                            };
+                        }
+                    }
+                    else {
+                        console.warn(`[${buildId}] ⚠️ No current project ID available for update`);
+                    }
                     sendEvent('progress', { step: 14, total: 16, message: 'Cleaning up...', buildId, sessionId });
                     clearTimeout(cleanupTimer);
                     yield cleanupTempDirectory(buildId);
@@ -439,24 +443,26 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('complete', {
                         success: true,
                         data: {
-                            workflow: "dynamic-user-based-modification",
+                            workflow: "enhanced-url-manager-modification",
                             approach: result.approach || 'UNKNOWN',
                             selectedFiles: result.selectedFiles || [],
                             addedFiles: result.addedFiles || [],
-                            modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (((_d = result.modifiedRanges) === null || _d === void 0 ? void 0 : _d.length) || 0),
+                            modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (((_c = result.modifiedRanges) === null || _c === void 0 ? void 0 : _c.length) || 0),
                             reasoning: result.reasoning,
                             modificationSummary: result.modificationSummary,
                             modificationDuration,
                             totalDuration,
-                            totalFilesAffected: (((_e = result.selectedFiles) === null || _e === void 0 ? void 0 : _e.length) || 0) + (((_f = result.addedFiles) === null || _f === void 0 ? void 0 : _f.length) || 0),
+                            totalFilesAffected: (((_d = result.selectedFiles) === null || _d === void 0 ? void 0 : _d.length) || 0) + (((_e = result.addedFiles) === null || _e === void 0 ? void 0 : _e.length) || 0),
                             previewUrl,
                             downloadUrl: urls.downloadUrl,
                             zipUrl,
                             buildId,
                             sessionId,
                             userId,
-                            projectId: urlResult.projectId,
+                            projectId: urlResult.projectId || currentProjectId,
                             projectAction: urlResult.action,
+                            skipReason: urlResult.skipReason,
+                            duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
                             hosting: "Azure Static Web Apps",
                             features: [
                                 "Global CDN",
@@ -475,12 +481,13 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     sendEvent('complete', {
                         success: true,
                         data: {
-                            workflow: "dynamic-user-based-modification-error",
+                            workflow: "enhanced-url-manager-modification-build-error",
                             approach: result.approach || 'UNKNOWN',
                             buildError: buildError instanceof Error ? buildError.message : 'Build failed',
                             buildId,
                             sessionId,
                             userId,
+                            projectId: currentProjectId,
                             message: "Modification completed, but build/deploy failed"
                         }
                     });
@@ -494,7 +501,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     reasoning: result.reasoning,
                     buildId,
                     sessionId,
-                    userId
+                    userId,
+                    projectId: currentProjectId
                 });
                 clearTimeout(cleanupTimer);
                 yield cleanupTempDirectory(buildId);
@@ -518,12 +526,11 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             res.end();
         }
     }));
-    // NON-STREAMING MODIFICATION ENDPOINT WITH DYNAMIC USER HANDLING
+    // NON-STREAMING MODIFICATION ENDPOINT
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b, _c, _d, _e;
         try {
-            const { prompt, sessionId: clientSessionId, userId: providedUserId // This can be undefined, null, or a number
-             } = req.body;
+            const { prompt, sessionId: clientSessionId, userId: providedUserId } = req.body;
             if (!prompt) {
                 res.status(400).json({
                     success: false,
@@ -555,32 +562,48 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 sessionManager.cleanup(sessionId);
             }, 5 * 60 * 1000);
             try {
-                // Get user's most recent project
+                // RESOLVE CURRENT PROJECT ID FOR UPDATING
+                const { projectId: currentProjectId, project: currentProject } = yield resolveCurrentProject(messageDB, urlManager, userId, sessionId);
+                // Enhanced project resolution using URL manager
                 let sessionContext = yield sessionManager.getSessionContext(sessionId);
-                let tempBuildDir;
-                const userProjects = yield messageDB.getUserProjects(userId);
-                if (userProjects.length > 0 && userProjects[0].zipUrl) {
-                    console.log(`[${buildId}] Found user's project: ${userProjects[0].name}`);
-                    tempBuildDir = yield downloadAndExtractProject(buildId, userProjects[0].zipUrl);
-                    sessionContext = {
-                        buildId,
-                        tempBuildDir,
-                        projectSummary: {
-                            summary: userProjects[0].description || 'User project',
-                            zipUrl: userProjects[0].zipUrl,
-                            buildId: userProjects[0].buildId
-                        },
-                        lastActivity: Date.now()
-                    };
-                    yield sessionManager.saveSessionContext(sessionId, sessionContext);
+                let tempBuildDir = "";
+                let targetProject = currentProject;
+                // Proper tempBuildDir assignment logic
+                if (currentProjectId) {
+                    console.log(`[${buildId}] Using current project ID: ${currentProjectId}`);
+                    const projectUrls = yield urlManager.getProjectUrls({ projectId: currentProjectId });
+                    if (projectUrls && projectUrls.zipUrl) {
+                        tempBuildDir = yield downloadAndExtractProject(buildId, projectUrls.zipUrl);
+                        targetProject = currentProject;
+                        sessionContext = {
+                            buildId,
+                            tempBuildDir,
+                            projectSummary: {
+                                summary: (currentProject === null || currentProject === void 0 ? void 0 : currentProject.description) || 'Project modification',
+                                zipUrl: projectUrls.zipUrl,
+                                buildId: projectUrls.buildId
+                            },
+                            lastActivity: Date.now()
+                        };
+                        yield sessionManager.saveSessionContext(sessionId, sessionContext);
+                    }
+                    else {
+                        // Fallback if current project has no zipUrl
+                        console.log(`[${buildId}] Current project ${currentProjectId} has no zipUrl, using template`);
+                        const sourceTemplateDir = path_1.default.join(__dirname, "../../react-base");
+                        tempBuildDir = path_1.default.join(__dirname, "../../temp-builds", buildId);
+                        yield fs.promises.mkdir(tempBuildDir, { recursive: true });
+                        yield fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+                    }
                 }
                 else {
-                    // Fallback to existing logic
+                    // Fallback logic - check session context first
                     sessionContext = yield sessionManager.getSessionContext(sessionId);
                     if (sessionContext && sessionContext.projectSummary && sessionContext.projectSummary.zipUrl) {
                         tempBuildDir = yield downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
                     }
                     else {
+                        // Check for active project summary
                         const projectSummary = yield messageDB.getActiveProjectSummary();
                         if (projectSummary && projectSummary.zipUrl) {
                             tempBuildDir = yield downloadAndExtractProject(buildId, projectSummary.zipUrl);
@@ -597,6 +620,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                             yield sessionManager.saveSessionContext(sessionId, sessionContext);
                         }
                         else {
+                            // Final fallback - use template
+                            console.log(`[${buildId}] No existing project found, using template`);
                             const sourceTemplateDir = path_1.default.join(__dirname, "../../react-base");
                             tempBuildDir = path_1.default.join(__dirname, "../../temp-builds", buildId);
                             yield fs.promises.mkdir(tempBuildDir, { recursive: true });
@@ -610,6 +635,21 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         }
                     }
                 }
+                // Ensure tempBuildDir is assigned before continuing
+                if (!tempBuildDir) {
+                    console.error(`[${buildId}] ❌ tempBuildDir not assigned, creating fallback`);
+                    const sourceTemplateDir = path_1.default.join(__dirname, "../../react-base");
+                    tempBuildDir = path_1.default.join(__dirname, "../../temp-builds", buildId);
+                    yield fs.promises.mkdir(tempBuildDir, { recursive: true });
+                    yield fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+                    sessionContext = {
+                        buildId,
+                        tempBuildDir,
+                        lastActivity: Date.now()
+                    };
+                    yield sessionManager.saveSessionContext(sessionId, sessionContext);
+                }
+                console.log(`[${buildId}] ✅ tempBuildDir assigned: ${tempBuildDir}`);
                 // Update session
                 yield sessionManager.updateSessionContext(sessionId, {
                     buildId,
@@ -690,14 +730,40 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 yield messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
                             }
                         }
-                        // DYNAMIC URL SAVING BY USER ID
-                        console.log(`[${buildId}] 💾 Saving deployment URLs for user ${userId}...`);
-                        const urlResult = yield saveProjectUrlsByUserId(messageDB, userId, buildId, {
-                            deploymentUrl: previewUrl,
-                            downloadUrl: urls.downloadUrl,
-                            zipUrl: zipUrl
-                        }, sessionId, prompt);
-                        console.log(`[${buildId}] ✅ URLs ${urlResult.action} - Project ID: ${urlResult.projectId}`);
+                        // USE ENHANCED URL MANAGER - UPDATE EXISTING PROJECT
+                        console.log(`[${buildId}] 💾 Using Enhanced URL Manager for modification...`);
+                        let urlResult = { action: 'no_project_to_update', projectId: null };
+                        if (currentProjectId) {
+                            try {
+                                const updatedProjectId = yield urlManager.saveNewProjectUrls(sessionId, currentProjectId, {
+                                    deploymentUrl: previewUrl,
+                                    downloadUrl: urls.downloadUrl,
+                                    zipUrl: zipUrl
+                                }, userId, {
+                                    name: targetProject === null || targetProject === void 0 ? void 0 : targetProject.name,
+                                    description: targetProject === null || targetProject === void 0 ? void 0 : targetProject.description,
+                                    framework: (targetProject === null || targetProject === void 0 ? void 0 : targetProject.framework) || 'react',
+                                    template: (targetProject === null || targetProject === void 0 ? void 0 : targetProject.template) || 'vite-react-ts'
+                                });
+                                urlResult = {
+                                    action: 'updated',
+                                    projectId: updatedProjectId,
+                                    skipReason: null
+                                };
+                                console.log(`[${buildId}] ✅ Updated existing project: ${updatedProjectId}`);
+                            }
+                            catch (updateError) {
+                                console.error(`[${buildId}] ❌ Failed to update project URLs:`, updateError);
+                                urlResult = {
+                                    action: 'update_failed',
+                                    projectId: currentProjectId,
+                                    error: updateError instanceof Error ? updateError.message : 'Unknown error'
+                                };
+                            }
+                        }
+                        else {
+                            console.warn(`[${buildId}] ⚠️ No current project ID available for update`);
+                        }
                         // Cleanup
                         clearTimeout(cleanupTimer);
                         yield cleanupTempDirectory(buildId);
@@ -706,7 +772,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         res.json({
                             success: true,
                             data: {
-                                workflow: "dynamic-user-based-modification",
+                                workflow: "enhanced-url-manager-modification",
                                 approach: result.approach || 'UNKNOWN',
                                 selectedFiles: result.selectedFiles || [],
                                 addedFiles: result.addedFiles || [],
@@ -715,7 +781,6 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 reasoning: result.reasoning,
                                 modificationSummary: result.modificationSummary,
                                 modificationDuration: modificationDuration,
-                                totalDuration: totalDuration,
                                 totalFilesAffected: (((_c = result.selectedFiles) === null || _c === void 0 ? void 0 : _c.length) || 0) + (((_d = result.addedFiles) === null || _d === void 0 ? void 0 : _d.length) || 0),
                                 previewUrl: previewUrl,
                                 downloadUrl: urls.downloadUrl,
@@ -723,8 +788,10 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 buildId: buildId,
                                 sessionId: sessionId,
                                 userId: userId,
-                                projectId: urlResult.projectId,
+                                projectId: urlResult.projectId || currentProjectId,
                                 projectAction: urlResult.action,
+                                skipReason: urlResult.skipReason,
+                                duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
                                 hosting: "Azure Static Web Apps",
                                 features: [
                                     "Global CDN",
@@ -732,7 +799,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                     "Custom domains support",
                                     "Staging environments",
                                 ],
-                                projectState: (sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) ? 'existing_project_modified' : 'new_project_created'
+                                projectState: currentProjectId ? 'existing_project_modified' : 'new_project_created',
+                                tempBuildDirPath: tempBuildDir
                             }
                         });
                     }
@@ -744,7 +812,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         res.json({
                             success: true,
                             data: {
-                                workflow: "dynamic-user-based-modification-error",
+                                workflow: "enhanced-url-manager-modification-build-error",
                                 approach: result.approach || 'UNKNOWN',
                                 selectedFiles: result.selectedFiles || [],
                                 addedFiles: result.addedFiles || [],
@@ -753,8 +821,10 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                                 buildId: buildId,
                                 sessionId: sessionId,
                                 userId: userId,
+                                projectId: currentProjectId,
                                 message: "Modification completed successfully, but build/deploy failed",
-                                projectState: (sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) ? 'existing_project_modified' : 'new_project_created'
+                                projectState: currentProjectId ? 'existing_project_modified' : 'new_project_created',
+                                tempBuildDirPath: tempBuildDir
                             }
                         });
                     }
@@ -783,11 +853,13 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                         approach: result.approach,
                         reasoning: result.reasoning,
                         selectedFiles: result.selectedFiles || [],
-                        workflow: "dynamic-user-based-modification",
+                        workflow: "enhanced-url-manager-modification",
                         buildId: buildId,
                         sessionId: sessionId,
                         userId: userId,
-                        projectState: (sessionContext === null || sessionContext === void 0 ? void 0 : sessionContext.projectSummary) ? 'existing_project_failed' : 'new_project_failed'
+                        projectId: currentProjectId,
+                        projectState: currentProjectId ? 'existing_project_failed' : 'new_project_failed',
+                        tempBuildDirPath: tempBuildDir
                     });
                 }
             }
@@ -799,7 +871,7 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     success: false,
                     error: 'Failed to setup project environment',
                     details: downloadError instanceof Error ? downloadError.message : 'Unknown error',
-                    workflow: "dynamic-user-based-modification",
+                    workflow: "enhanced-url-manager-modification",
                     buildId: buildId,
                     sessionId: sessionId,
                     userId: userId
@@ -814,14 +886,14 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                 success: false,
                 error: 'Internal server error during modification',
                 details: error.message,
-                workflow: "dynamic-user-based-modification",
+                workflow: "enhanced-url-manager-modification",
                 buildId: buildId,
                 sessionId: sessionId,
                 userId: req.body.userId || 'unresolved'
             });
         }
     }));
-    // UPDATED ENDPOINT TO GET USER'S PROJECTS WITH DYNAMIC USER RESOLUTION
+    // GET USER'S PROJECTS ENDPOINT
     router.get("/user/:userId/projects", (req, res) => __awaiter(this, void 0, void 0, function* () {
         try {
             const { userId: paramUserId } = req.params;
@@ -836,6 +908,8 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             // Ensure user exists before getting projects
             const resolvedUserId = yield resolveUserId(messageDB, userId);
             const projects = yield messageDB.getUserProjects(resolvedUserId);
+            // Get additional stats using URL manager
+            const stats = yield urlManager.getUserProjectStats(resolvedUserId);
             res.json({
                 success: true,
                 data: projects.map(project => ({
@@ -851,11 +925,14 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
                     template: project.template,
                     messageCount: project.messageCount,
                     lastMessageAt: project.lastMessageAt,
+                    conversationTitle: project.conversationTitle,
                     createdAt: project.createdAt,
                     updatedAt: project.updatedAt
                 })),
                 userId: resolvedUserId,
-                totalProjects: projects.length
+                totalProjects: projects.length,
+                stats: stats,
+                duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking"
             });
         }
         catch (error) {
@@ -866,30 +943,29 @@ function initializeModificationRoutes(anthropic, messageDB, redis, sessionManage
             });
         }
     }));
-    // NEW ENDPOINT TO GET OR CREATE USER
-    router.post("/user/ensure", (req, res) => __awaiter(this, void 0, void 0, function* () {
+    // GET PROJECT URLS ENDPOINT
+    router.get("/project/:projectId/urls", (req, res) => __awaiter(this, void 0, void 0, function* () {
         try {
-            const { userId, userData } = req.body;
-            if (!userId) {
-                res.status(400).json({
+            const { projectId } = req.params;
+            const projectUrls = yield urlManager.getProjectUrls({
+                projectId: parseInt(projectId)
+            });
+            if (!projectUrls) {
+                res.status(404).json({
                     success: false,
-                    error: 'User ID is required'
+                    error: 'Project not found'
                 });
                 return;
             }
-            const resolvedUserId = yield messageDB.ensureUserExists(parseInt(userId), userData);
             res.json({
                 success: true,
-                data: {
-                    userId: resolvedUserId,
-                    action: resolvedUserId === parseInt(userId) ? 'existed' : 'created'
-                }
+                data: projectUrls
             });
         }
         catch (error) {
             res.status(500).json({
                 success: false,
-                error: 'Failed to ensure user exists',
+                error: 'Failed to get project URLs',
                 details: error instanceof Error ? error.message : 'Unknown error'
             });
         }

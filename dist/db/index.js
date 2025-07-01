@@ -34,15 +34,15 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.schema = exports.db = void 0;
-// db/index.ts - Clean database connection
+// db/index.ts - Updated to use unified schema
 const neon_http_1 = require("drizzle-orm/neon-http");
 const serverless_1 = require("@neondatabase/serverless");
-// Import your existing project schema
-const schema = __importStar(require("./project_schema"));
+// Import the unified schema (SINGLE SOURCE OF TRUTH)
+const schema = __importStar(require("./message_schema"));
 exports.schema = schema;
 // Create connection
 const sql = (0, serverless_1.neon)(process.env.DATABASE_URL);
-// Create database instance with main schema
+// Create database instance with unified schema
 exports.db = (0, neon_http_1.drizzle)(sql, {
     schema: Object.assign({}, schema)
 });

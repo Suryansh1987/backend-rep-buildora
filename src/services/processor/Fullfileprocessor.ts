@@ -452,17 +452,19 @@ class EnhancedContentGenerator {
     this.anthropic = anthropic;
   }
 
-  async generateModifications(
-    prompt: string,
-    relevantFiles: FileAnalysisResult[]
-  ): Promise<Array<{ filePath: string; modifiedContent: string }>> {
-    
-    const modificationPrompt = `
-TASK: Modify the provided files according to the user request.
+ async generateModifications(
+  prompt: string,
+  relevantFiles: FileAnalysisResult[]
+): Promise<Array<{ filePath: string; modifiedContent: string }>> {
+  
+  const modificationPrompt = `
+🚧 TASK OVERVIEW:
+You are an expert TypeScript and React engineer. Modify the provided files according to the user's request while following best practices and avoiding errors related to unresolved imports, types, or external dependencies.
 
-USER REQUEST: "${prompt}"
+👤 USER REQUEST:
+"${prompt}"
 
-FILES TO MODIFY:
+🗂️ FILES TO MODIFY:
 
 ${relevantFiles.map((result, index) => `
 === FILE ${index + 1}: ${result.filePath} ===
@@ -476,42 +478,49 @@ ${result.file.content}
 \`\`\`
 `).join('\n')}
 
-INSTRUCTIONS:
-1. Modify files according to the user request
-2. Maintain all imports, exports, and existing functionality
-3. Keep proper TypeScript syntax
-4. Return complete modified files
-5. DO NOT use styled-components imports like: import { createGlobalStyle } from 'styled-components';
-6. Use Tailwind CSS classes for styling
-7. Preserve existing component structure and props
-8. Ensure responsive design principles
+📏 STRICT INSTRUCTIONS:
+1. Only modify the files listed above. Do NOT assume or use any files not listed.
+2. If a file imports types, components, or utilities from another file that is NOT listed, you MUST:
+   - Recreate the missing type locally in the file.
+   - Recreate minimal versions of utilities/components **inline** inside the component or page as needed.
+   - Do NOT import from unknown paths — no assumptions allowed.
+3. If a type/interface is missing, define it inline at the top or near usage. Keep definitions minimal but correct.
+4. Maintain TypeScript syntax correctness at all times.
+5. Do not use styled-components. You MUST use **Tailwind CSS** classes for styling.
+6. Keep the structure of existing components, props, and imports unless change is required by the prompt.
+7. Ensure the UI remains **responsive** and **accessible**.
+8. Do NOT add any new external dependencies.
+9. DO NOT generate relative imports for files that are not included in the list.
+10. If you must extract logic or a helper function, define it inside the same file — do NOT assume separate utility files.
 
-RESPONSE FORMAT:
+📦 RESPONSE FORMAT:
 Return each modified file in clearly marked code blocks:
 
-\`\`\`tsx
+\\\tsx
 // FILE: ${relevantFiles[0]?.filePath}
 [COMPLETE MODIFIED CONTENT]
-\`\`\`
+\\\
 
-Continue for all files. Be sure to include the FILE comment for each.
+Continue for all files. Be sure to include the FILE comment for each..
 `;
 
-    try {
-      const response = await this.anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20240620',
-        max_tokens: 8000,
-        temperature: 0.1,
-        messages: [{ role: 'user', content: modificationPrompt }],
-      });
+  try {
+    const response = await this.anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20240620',
+      max_tokens: 8000,
+      temperature: 0.1,
+      messages: [{ role: 'user', content: modificationPrompt }],
+    });
 
-      const responseText = response.content[0]?.text || '';
-      return this.extractModifiedFiles(responseText, relevantFiles);
-      
-    } catch (error) {
-      return [];
-    }
+    const responseText = response.content[0]?.text || '';
+    return this.extractModifiedFiles(responseText, relevantFiles);
+    
+  } catch (error) {
+    console.error('Error generating modifications:', error);
+    return [];
   }
+}
+
 
   private extractModifiedFiles(
     responseText: string,

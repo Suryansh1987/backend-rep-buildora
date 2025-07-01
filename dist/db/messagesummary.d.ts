@@ -39,8 +39,27 @@ export declare class DrizzleMessageHistoryDB {
     private defaultSessionId;
     constructor(databaseUrl: string, anthropic: Anthropic);
     /**
-     * Get messages for a specific project
+     * Get a single project by ID
      */
+    getProject(projectId: number): Promise<any>;
+    /**
+     * Update project title and conversation metadata
+     */
+    updateProjectTitle(projectId: number, updateData: {
+        conversationTitle?: string;
+        updatedAt: Date;
+    }): Promise<void>;
+    /**
+     * Update project with general data
+     */
+    updateProject(projectId: number, updateData: {
+        name?: string;
+        description?: string;
+        conversationTitle?: string;
+        lastMessageAt?: Date;
+        updatedAt: Date;
+        [key: string]: any;
+    }): Promise<void>;
     getProjectMessages(projectId: number, limit?: number): Promise<{
         success: boolean;
         data?: any[];
@@ -221,9 +240,6 @@ export declare class DrizzleMessageHistoryDB {
      * Initialize stats for a specific session (new method)
      */
     initializeSessionStats(sessionId: string, projectId?: number): Promise<void>;
-    /**
-     * Get project sessions (new method)
-     */
     getProjectSessions(projectId: number): Promise<any[]>;
 }
 export {};

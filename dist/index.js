@@ -121,6 +121,20 @@ function initializeServices() {
 }
 initializeServices();
 console.log('📊 Database URL configured:', !!process.env.DATABASE_URL);
+app.post("/api/projects/generate", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    console.log('🔄 Redirecting legacy /api/projects/generate to /api/generate');
+    try {
+        // Forward the request to the generate route
+        const response = yield axios_1.default.post(`http://localhost:${PORT}/api/generate`, req.body, {
+            headers: { 'Content-Type': 'application/json' }
+        });
+        res.json(response.data);
+    }
+    catch (error) {
+        console.error('Error forwarding to /api/generate:', error.message);
+        res.status(500).json({ error: 'Internal server error', details: error.message });
+    }
+}));
 app.get("/", (req, res) => {
     res.json({
         message: "Backend is up with Redis stateless integration",
@@ -153,21 +167,6 @@ app.use("/api/generate", (0, generation_1.initializeGenerationRoutes)(anthropic,
 app.use("/api/modify", (0, modification_1.initializeModificationRoutes)(anthropic, messageDB, redis, sessionManager));
 app.use("/api/conversation", (0, conversation_1.initializeConversationRoutes)(messageDB, redis, sessionManager));
 app.use("/api/redis", (0, redis_stats_1.initializeRedisRoutes)(redis));
-// Legacy route redirects with proper handling
-app.post("/api/projects/generate", (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    console.log('🔄 Redirecting legacy /api/projects/generate to /api/generate');
-    try {
-        // Forward the request to the generate route
-        const response = yield axios_1.default.post(`http://localhost:${PORT}/api/generate`, req.body, {
-            headers: { 'Content-Type': 'application/json' }
-        });
-        res.json(response.data);
-    }
-    catch (error) {
-        console.error('Error forwarding to /api/generate:', error.message);
-        res.status(500).json({ error: 'Internal server error', details: error.message });
-    }
-}));
 // Legacy endpoints - simplified fallback responses
 app.post("/modify-with-history-stream", (req, res) => {
     console.log('🔄 Legacy /modify-with-history-stream called - feature not available');

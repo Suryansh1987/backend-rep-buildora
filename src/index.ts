@@ -81,7 +81,19 @@ async function initializeServices() {
 initializeServices();
 
 console.log('📊 Database URL configured:', !!process.env.DATABASE_URL);
-
+app.post("/api/projects/generate", async (req: Request, res: Response) => {
+  console.log('🔄 Redirecting legacy /api/projects/generate to /api/generate');
+  try {
+    // Forward the request to the generate route
+    const response = await axios.post(`http://localhost:${PORT}/api/generate`, req.body, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    res.json(response.data);
+  } catch (error: any) {
+    console.error('Error forwarding to /api/generate:', error.message);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
 app.get("/", (req: Request, res: Response) => {
   res.json({
     message: "Backend is up with Redis stateless integration",
@@ -118,20 +130,8 @@ app.use("/api/modify", initializeModificationRoutes(anthropic, messageDB, redis,
 app.use("/api/conversation", initializeConversationRoutes(messageDB, redis, sessionManager));
 app.use("/api/redis", initializeRedisRoutes(redis));
 
-// Legacy route redirects with proper handling
-app.post("/api/projects/generate", async (req: Request, res: Response) => {
-  console.log('🔄 Redirecting legacy /api/projects/generate to /api/generate');
-  try {
-    // Forward the request to the generate route
-    const response = await axios.post(`http://localhost:${PORT}/api/generate`, req.body, {
-      headers: { 'Content-Type': 'application/json' }
-    });
-    res.json(response.data);
-  } catch (error: any) {
-    console.error('Error forwarding to /api/generate:', error.message);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
-  }
-});
+
+
 
 // Legacy endpoints - simplified fallback responses
 app.post("/modify-with-history-stream", (req: Request, res: Response) => {

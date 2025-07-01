@@ -1,9 +1,10 @@
-// routes/modification.ts - Updated with dynamic user handling and improved error handling
+// routes/modification.ts - Updated with Enhanced URL Manager and improved duplicate prevention
 import express, { Request, Response } from "express";
 import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 import { StatelessSessionManager } from './session';
 import { DrizzleMessageHistoryDB } from '../db/messagesummary';
 import { RedisService } from '../services/Redis';
+import { EnhancedProjectUrlManager } from '../db/url-manager';
 import { ModificationChange } from '../services/filemodifier/types';
 import { v4 as uuidv4 } from "uuid";
 import AdmZip from "adm-zip";
@@ -26,11 +27,8 @@ class StatelessConversationHelper {
     private messageDB: DrizzleMessageHistoryDB,
     private redis: RedisService
   ) {}
-
+ 
   async saveModification(sessionId: string, modification: any): Promise<void> {
-    // Save to database (persistent)
-    await this.messageDB.saveModification(modification);
-    
     // Save to Redis session state (fast access) - using proper ModificationChange interface
     const change = {
       type: 'modified' as const,
@@ -84,74 +82,6 @@ class StatelessConversationHelper {
   }
 }
 
-// IMPROVED URL MANAGEMENT FUNCTION WITH DYNAMIC USER HANDLING
-async function saveProjectUrlsByUserId(
-  messageDB: DrizzleMessageHistoryDB,
-  userId: number,
-  buildId: string,
-  urls: {
-    deploymentUrl: string;
-    downloadUrl: string;
-    zipUrl: string;
-  },
-  sessionId: string,
-  prompt?: string
-): Promise<{ projectId: number; action: 'created' | 'updated' }> {
-  try {
-    console.log(`📊 Dynamic URL Management - User: ${userId}, Build: ${buildId}`);
-
-    // First, ensure the user exists in the database
-    await messageDB.ensureUserExists(userId);
-
-    // Get user's most recent project
-    const userProjects = await messageDB.getUserProjects(userId);
-    
-    if (userProjects.length > 0) {
-      // Update the most recent project
-      const project = userProjects[0]; // Most recent project
-      
-      await messageDB.updateProjectUrls(project.id, {
-        deploymentUrl: urls.deploymentUrl,
-        downloadUrl: urls.downloadUrl,
-        zipUrl: urls.zipUrl,
-        buildId: buildId,
-        status: 'ready',
-        lastSessionId: sessionId,
-        lastMessageAt: new Date(),
-        updatedAt: new Date()
-      });
-      
-      console.log(`✅ Updated existing project ${project.id} for user ${userId}`);
-      return { projectId: project.id, action: 'updated' };
-      
-    } else {
-      // Create new project for user
-      const projectId = await messageDB.createProject({
-        userId: userId,
-        name: `Project ${buildId.slice(0, 8)}`,
-        description: prompt?.substring(0, 200) || 'Auto-generated from modification',
-        status: 'ready',
-        projectType: 'frontend',
-        deploymentUrl: urls.deploymentUrl,
-        downloadUrl: urls.downloadUrl,
-        zipUrl: urls.zipUrl,
-        buildId: buildId,
-        lastSessionId: sessionId,
-        framework: 'react',
-        template: 'vite-react-ts',
-        lastMessageAt: new Date(),
-        messageCount: 1
-      });
-      
-      console.log(`✅ Created new project ${projectId} for user ${userId}`);
-      return { projectId, action: 'created' };
-    }
-  } catch (error) {
-    console.error('❌ Failed to save project URLs:', error);
-    throw error;
-  }
-}
-
 // FALLBACK USER RESOLUTION FUNCTION
 async function resolveUserId(
   messageDB: DrizzleMessageHistoryDB,
@@ -179,7 +109,7 @@ async function resolveUserId(
     }
 
     // Priority 4: Create a new user with current timestamp
-    const newUserId = Date.now() % 1000000; // Use timestamp-based ID
+    const newUserId = Date.now() % 1000000;
     await messageDB.ensureUserExists(newUserId, {
       email: `user${newUserId}@buildora.dev`,
       name: `User ${newUserId}`
@@ -193,7 +123,40 @@ async function resolveUserId(
   }
 }
 
-// Utility functions (unchanged)
+// SIMPLIFIED PROJECT RESOLUTION - Gets current project ID for updates (NO EXPLICIT PROJECT ID)
+async function resolveCurrentProject(
+  messageDB: DrizzleMessageHistoryDB,
+  urlManager: EnhancedProjectUrlManager,
+  userId: number,
+  sessionId?: string
+): Promise<{ projectId: number | null; project: any | null }> {
+  try {
+    // Priority 1: Get user's most recent project
+    const userProjects = await messageDB.getUserProjects(userId);
+    if (userProjects.length > 0) {
+      const recentProject = userProjects[0]; // Most recent project
+      console.log(`✅ Using user's most recent project: ${recentProject.id}`);
+      return { projectId: recentProject.id, project: recentProject };
+    }
+
+    // Priority 2: Check session for project
+    if (sessionId) {
+      const sessionProject = await messageDB.getProjectBySessionId(sessionId);
+      if (sessionProject) {
+        console.log(`✅ Using session project: ${sessionProject.id}`);
+        return { projectId: sessionProject.id, project: sessionProject };
+      }
+    }
+
+    console.log(`⚠️ No current project found for user ${userId}`);
+    return { projectId: null, project: null };
+  } catch (error) {
+    console.error('❌ Failed to resolve current project:', error);
+    return { projectId: null, project: null };
+  }
+}
+
+// Utility functions
 async function downloadAndExtractProject(buildId: string, zipUrl: string): Promise<string> {
   const tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
   
@@ -248,342 +211,379 @@ export function initializeModificationRoutes(
 ): express.Router {
   
   const conversationHelper = new StatelessConversationHelper(messageDB, redis);
+  const urlManager = new EnhancedProjectUrlManager(messageDB);
 
-  // STATELESS STREAMING MODIFICATION ENDPOINT WITH DYNAMIC USER HANDLING
- router.post("/stream", async (req: Request, res: Response): Promise<void> => {
-  const { 
-    prompt, 
-    sessionId: clientSessionId,
-    userId: providedUserId // This can be undefined, null, or a number
-  } = req.body;
-  
-  if (!prompt) {
-    res.status(400).json({
-      success: false,
-      error: "Prompt is required"
-    });
-    return;
-  }
-
-  const sessionId = clientSessionId || sessionManager.generateSessionId();
-  const buildId = uuidv4();
-  
-  // Resolve user ID dynamically
-  let userId: number;
-  try {
-    userId = await resolveUserId(messageDB, providedUserId, sessionId);
-    console.log(`[${buildId}] Resolved user ID: ${userId} (provided: ${providedUserId})`);
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: 'Failed to resolve user for modification',
-      details: error instanceof Error ? error.message : 'Unknown error',
-      buildId,
-      sessionId
-    });
-    return;
-  }
-  
-  console.log(`[${buildId}] Starting modification for user: ${userId}, session: ${sessionId}`);
-  console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': 'http://localhost:5173',
-    'Access-Control-Allow-Credentials': 'true'
-  });
-
-  const sendEvent = (type: string, data: any) => {
-    console.log(`📤 Sending ${type} event:`, data);
-    res.write(`event: ${type}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-
-  const cleanupTimer = setTimeout(() => {
-    cleanupTempDirectory(buildId);
-    sessionManager.cleanup(sessionId);
-  }, 5 * 60 * 1000);
-
-  try {
-    sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
-
-    let sessionContext = await sessionManager.getSessionContext(sessionId);
-    let tempBuildDir: string = '';
-    let userProject = null;
-
-    const userProjects = await messageDB.getUserProjects(userId);
-    if (userProjects.length > 0) {
-      userProject = userProjects[0];
-      if (userProject.zipUrl) {
-        sendEvent('progress', { step: 2, total: 16, message: `Found user's project: ${userProject.name}. Downloading...`, buildId, sessionId });
-        tempBuildDir = await downloadAndExtractProject(buildId, userProject.zipUrl);
-        sessionContext = {
-          buildId,
-          tempBuildDir,
-          projectSummary: {
-            summary: userProject.description || 'User project',
-            zipUrl: userProject.zipUrl,
-            buildId: userProject.buildId
-          },
-          lastActivity: Date.now()
-        };
-        await sessionManager.saveSessionContext(sessionId, sessionContext);
-      }
+  // STATELESS STREAMING MODIFICATION ENDPOINT
+  router.post("/stream", async (req: Request, res: Response): Promise<void> => {
+    const { 
+      prompt, 
+      sessionId: clientSessionId,
+      userId: providedUserId
+    } = req.body;
+    
+    if (!prompt) {
+      res.status(400).json({
+        success: false,
+        error: "Prompt is required"
+      });
+      return;
     }
 
-    if (!sessionContext || !sessionContext.projectSummary?.zipUrl) {
-      sendEvent('progress', { step: 2, total: 16, message: 'No user project found. Checking Redis...', buildId, sessionId });
+    const sessionId = clientSessionId || sessionManager.generateSessionId();
+    const buildId = uuidv4();
+    
+    // Resolve user ID dynamically
+    let userId: number;
+    try {
+      userId = await resolveUserId(messageDB, providedUserId, sessionId);
+      console.log(`[${buildId}] Resolved user ID: ${userId} (provided: ${providedUserId})`);
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to resolve user for modification',
+        details: error instanceof Error ? error.message : 'Unknown error',
+        buildId,
+        sessionId
+      });
+      return;
+    }
+    
+    console.log(`[${buildId}] Starting modification for user: ${userId}, session: ${sessionId}`);
+    console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
 
-      sessionContext = await sessionManager.getSessionContext(sessionId);
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': 'http://localhost:5173',
+      'Access-Control-Allow-Credentials': 'true'
+    });
 
-      if (sessionContext?.projectSummary?.zipUrl) {
-        tempBuildDir = await downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
-      } else {
-        const projectSummary = await messageDB.getActiveProjectSummary();
+    const sendEvent = (type: string, data: any) => {
+      console.log(`📤 Sending ${type} event:`, data);
+      res.write(`event: ${type}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
 
-        if (projectSummary?.zipUrl) {
-          tempBuildDir = await downloadAndExtractProject(buildId, projectSummary.zipUrl);
+    const cleanupTimer = setTimeout(() => {
+      cleanupTempDirectory(buildId);
+      sessionManager.cleanup(sessionId);
+    }, 5 * 60 * 1000);
+
+    try {
+      sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
+
+      // RESOLVE CURRENT PROJECT ID FOR UPDATING
+      const { projectId: currentProjectId, project: currentProject } = await resolveCurrentProject(
+        messageDB, 
+        urlManager, 
+        userId, 
+        sessionId
+      );
+
+      let sessionContext = await sessionManager.getSessionContext(sessionId);
+      let tempBuildDir: string = '';
+      let userProject = currentProject;
+
+      // Enhanced project resolution using URL manager
+      if (currentProjectId) {
+        sendEvent('progress', { step: 2, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
+        const projectUrls = await urlManager.getProjectUrls({ projectId: currentProjectId });
+        if (projectUrls && projectUrls.zipUrl) {
+          tempBuildDir = await downloadAndExtractProject(buildId, projectUrls.zipUrl);
           sessionContext = {
             buildId,
             tempBuildDir,
             projectSummary: {
-              summary: projectSummary.summary,
-              zipUrl: projectSummary.zipUrl,
-              buildId: projectSummary.buildId
+              summary: currentProject?.description || 'Project modification',
+              zipUrl: projectUrls.zipUrl,
+              buildId: projectUrls.buildId
             },
             lastActivity: Date.now()
           };
           await sessionManager.saveSessionContext(sessionId, sessionContext);
+        }
+      } else {
+        // Fallback logic
+        sendEvent('progress', { step: 2, total: 16, message: 'No current project found. Checking Redis...', buildId, sessionId });
+
+        sessionContext = await sessionManager.getSessionContext(sessionId);
+
+        if (sessionContext?.projectSummary?.zipUrl) {
+          tempBuildDir = await downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
         } else {
-          const sourceTemplateDir = path.join(__dirname, "../../react-base");
-          tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
-          await fs.promises.mkdir(tempBuildDir, { recursive: true });
-          await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
-
-          sessionContext = {
-            buildId,
-            tempBuildDir,
-            lastActivity: Date.now()
-          };
-          await sessionManager.saveSessionContext(sessionId, sessionContext);
-        }
-      }
-    }
-
-    // ✅ Now tempBuildDir is guaranteed to be defined
-
-    sendEvent('progress', { step: 3, total: 16, message: 'Project environment ready!', buildId, sessionId });
-
-    await sessionManager.updateSessionContext(sessionId, {
-      buildId,
-      tempBuildDir,
-      lastActivity: Date.now()
-    });
-
-    let enhancedPrompt = prompt;
-    try {
-      const context = await conversationHelper.getEnhancedContext(sessionId);
-      if (context) {
-        enhancedPrompt = `${context}\n\n--- CURRENT REQUEST ---\n${prompt}`;
-        sendEvent('progress', { step: 4, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
-      }
-    } catch {
-      sendEvent('progress', { step: 4, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
-    }
-
-    const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
-    fileModifier.setStreamCallback((message) => sendEvent('progress', { step: 7, total: 16, message, buildId, sessionId }));
-
-    sendEvent('progress', { step: 5, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
-
-    const startTime = Date.now();
-
-    const result = await fileModifier.processModification(
-      enhancedPrompt,
-      undefined,
-      sessionContext?.projectSummary?.summary,
-      async (summary, prompt) => {
-        try {
-          const summaryId = await messageDB.saveProjectSummary(summary, prompt, "", buildId, userId);
-          console.log(`💾 Saved project summary, ID: ${summaryId}`);
-          return summaryId;
-        } catch (err) {
-          console.error('⚠️ Error saving summary:', err);
-          return null;
-        }
-      }
-    );
-
-    const modificationDuration = Date.now() - startTime;
-
-    if (result.success) {
-      sendEvent('progress', { step: 8, total: 16, message: 'Modification complete! Building...', buildId, sessionId });
-
-      try {
-        const zip = new AdmZip();
-        zip.addLocalFolder(tempBuildDir);
-        const zipBuffer = zip.toBuffer();
-
-        const zipBlobName = `${buildId}/source.zip`;
-        const zipUrl = await uploadToAzureBlob(
-          process.env.AZURE_STORAGE_CONNECTION_STRING!,
-          "source-zips",
-          zipBlobName,
-          zipBuffer
-        );
-
-        sendEvent('progress', { step: 10, total: 16, message: 'Building app...', buildId, sessionId });
-
-        const DistUrl = await triggerAzureContainerJob(zipUrl, buildId, {
-          resourceGroup: process.env.AZURE_RESOURCE_GROUP!,
-          containerAppEnv: process.env.AZURE_CONTAINER_APP_ENV!,
-          acrName: process.env.AZURE_ACR_NAME!,
-          storageConnectionString: process.env.AZURE_STORAGE_CONNECTION_STRING!,
-          storageAccountName: process.env.AZURE_STORAGE_ACCOUNT_NAME!,
-        });
-
-        const urls = JSON.parse(DistUrl);
-        const builtZipUrl = urls.downloadUrl;
-
-        sendEvent('progress', { step: 11, total: 16, message: 'Deploying...', buildId, sessionId });
-        const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
-
-        sendEvent('progress', { step: 12, total: 16, message: 'Updating database...', buildId, sessionId });
-
-        await sessionManager.updateSessionContext(sessionId, {
-          projectSummary: {
-            ...sessionContext?.projectSummary,
-            zipUrl,
-            buildId
-          }
-        });
-
-        if (sessionContext?.projectSummary) {
           const projectSummary = await messageDB.getActiveProjectSummary();
-          if (projectSummary) {
-            await messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
+
+          if (projectSummary?.zipUrl) {
+            tempBuildDir = await downloadAndExtractProject(buildId, projectSummary.zipUrl);
+            sessionContext = {
+              buildId,
+              tempBuildDir,
+              projectSummary: {
+                summary: projectSummary.summary,
+                zipUrl: projectSummary.zipUrl,
+                buildId: projectSummary.buildId
+              },
+              lastActivity: Date.now()
+            };
+            await sessionManager.saveSessionContext(sessionId, sessionContext);
+          } else {
+            const sourceTemplateDir = path.join(__dirname, "../../react-base");
+            tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
+            await fs.promises.mkdir(tempBuildDir, { recursive: true });
+            await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+
+            sessionContext = {
+              buildId,
+              tempBuildDir,
+              lastActivity: Date.now()
+            };
+            await sessionManager.saveSessionContext(sessionId, sessionContext);
           }
         }
-
-        sendEvent('progress', { step: 13, total: 16, message: 'Saving URLs...', buildId, sessionId });
-
-        const urlResult = await saveProjectUrlsByUserId(
-          messageDB,
-          userId,
-          buildId,
-          {
-            deploymentUrl: previewUrl as string,
-            downloadUrl: urls.downloadUrl,
-            zipUrl
-          },
-          sessionId,
-          prompt
-        );
-
-        sendEvent('progress', { step: 14, total: 16, message: 'Cleaning up...', buildId, sessionId });
-        clearTimeout(cleanupTimer);
-        await cleanupTempDirectory(buildId);
-
-        sendEvent('progress', { step: 15, total: 16, message: `🎉 Live at: ${previewUrl}`, buildId, sessionId });
-
-        const totalDuration = Date.now() - startTime;
-
-        sendEvent('complete', {
-          success: true,
-          data: {
-            workflow: "dynamic-user-based-modification",
-            approach: result.approach || 'UNKNOWN',
-            selectedFiles: result.selectedFiles || [],
-            addedFiles: result.addedFiles || [],
-            modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (result.modifiedRanges?.length || 0),
-            reasoning: result.reasoning,
-            modificationSummary: result.modificationSummary,
-            modificationDuration,
-            totalDuration,
-            totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
-            previewUrl,
-            downloadUrl: urls.downloadUrl,
-            zipUrl,
-            buildId,
-            sessionId,
-            userId,
-            projectId: urlResult.projectId,
-            projectAction: urlResult.action,
-            hosting: "Azure Static Web Apps",
-            features: [
-              "Global CDN",
-              "Auto SSL/HTTPS", 
-              "Custom domains support",
-              "Staging environments",
-            ]
-          }
-        });
-
-        await fileModifier.cleanup();
-
-      } catch (buildError) {
-        console.error(`[${buildId}] Build pipeline failed:`, buildError);
-        clearTimeout(cleanupTimer);
-        await cleanupTempDirectory(buildId);
-
-        sendEvent('complete', {
-          success: true,
-          data: {
-            workflow: "dynamic-user-based-modification-error",
-            approach: result.approach || 'UNKNOWN',
-            buildError: buildError instanceof Error ? buildError.message : 'Build failed',
-            buildId,
-            sessionId,
-            userId,
-            message: "Modification completed, but build/deploy failed"
-          }
-        });
       }
 
-    } else {
+      sendEvent('progress', { step: 3, total: 16, message: 'Project environment ready!', buildId, sessionId });
+
+      await sessionManager.updateSessionContext(sessionId, {
+        buildId,
+        tempBuildDir,
+        lastActivity: Date.now()
+      });
+
+      let enhancedPrompt = prompt;
+      try {
+        const context = await conversationHelper.getEnhancedContext(sessionId);
+        if (context) {
+          enhancedPrompt = `${context}\n\n--- CURRENT REQUEST ---\n${prompt}`;
+          sendEvent('progress', { step: 4, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
+        }
+      } catch {
+        sendEvent('progress', { step: 4, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
+      }
+
+      const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
+      fileModifier.setStreamCallback((message) => sendEvent('progress', { step: 7, total: 16, message, buildId, sessionId }));
+
+      sendEvent('progress', { step: 5, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
+
+      const startTime = Date.now();
+
+      const result = await fileModifier.processModification(
+        enhancedPrompt,
+        undefined,
+        sessionContext?.projectSummary?.summary,
+        async (summary, prompt) => {
+          try {
+            const summaryId = await messageDB.saveProjectSummary(summary, prompt, "", buildId, userId);
+            console.log(`💾 Saved project summary, ID: ${summaryId}`);
+            return summaryId;
+          } catch (err) {
+            console.error('⚠️ Error saving summary:', err);
+            return null;
+          }
+        }
+      );
+
+      const modificationDuration = Date.now() - startTime;
+
+      if (result.success) {
+        sendEvent('progress', { step: 8, total: 16, message: 'Modification complete! Building...', buildId, sessionId });
+
+        try {
+          const zip = new AdmZip();
+          zip.addLocalFolder(tempBuildDir);
+          const zipBuffer = zip.toBuffer();
+
+          const zipBlobName = `${buildId}/source.zip`;
+          const zipUrl = await uploadToAzureBlob(
+            process.env.AZURE_STORAGE_CONNECTION_STRING!,
+            "source-zips",
+            zipBlobName,
+            zipBuffer
+          );
+
+          sendEvent('progress', { step: 10, total: 16, message: 'Building app...', buildId, sessionId });
+
+          const DistUrl = await triggerAzureContainerJob(zipUrl, buildId, {
+            resourceGroup: process.env.AZURE_RESOURCE_GROUP!,
+            containerAppEnv: process.env.AZURE_CONTAINER_APP_ENV!,
+            acrName: process.env.AZURE_ACR_NAME!,
+            storageConnectionString: process.env.AZURE_STORAGE_CONNECTION_STRING!,
+            storageAccountName: process.env.AZURE_STORAGE_ACCOUNT_NAME!,
+          });
+
+          const urls = JSON.parse(DistUrl);
+          const builtZipUrl = urls.downloadUrl;
+
+          sendEvent('progress', { step: 11, total: 16, message: 'Deploying...', buildId, sessionId });
+          const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
+
+          sendEvent('progress', { step: 12, total: 16, message: 'Updating database...', buildId, sessionId });
+
+          await sessionManager.updateSessionContext(sessionId, {
+            projectSummary: {
+              ...sessionContext?.projectSummary,
+              zipUrl,
+              buildId
+            }
+          });
+
+          if (sessionContext?.projectSummary) {
+            const projectSummary = await messageDB.getActiveProjectSummary();
+            if (projectSummary) {
+              await messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
+            }
+          }
+
+          sendEvent('progress', { step: 13, total: 16, message: 'Updating project URLs...', buildId, sessionId });
+
+          // USE ENHANCED URL MANAGER - UPDATE EXISTING PROJECT
+          let urlResult: any = { action: 'no_project_to_update', projectId: null };
+          
+          if (currentProjectId) {
+            try {
+              const updatedProjectId = await urlManager.saveNewProjectUrls(
+                sessionId,
+                currentProjectId,
+                {
+                  deploymentUrl: previewUrl as string,
+                  downloadUrl: urls.downloadUrl,
+                  zipUrl
+                },
+                userId,
+                {
+                  name: userProject?.name,
+                  description: userProject?.description,
+                  framework: userProject?.framework || 'react',
+                  template: userProject?.template || 'vite-react-ts'
+                }
+              );
+
+              urlResult = { 
+                action: 'updated', 
+                projectId: updatedProjectId,
+                skipReason: null 
+              };
+              console.log(`[${buildId}] ✅ Updated existing project: ${updatedProjectId}`);
+              
+            } catch (updateError) {
+              console.error(`[${buildId}] ❌ Failed to update project URLs:`, updateError);
+              urlResult = { 
+                action: 'update_failed', 
+                projectId: currentProjectId,
+                error: updateError instanceof Error ? updateError.message : 'Unknown error'
+              };
+            }
+          } else {
+            console.warn(`[${buildId}] ⚠️ No current project ID available for update`);
+          }
+
+          sendEvent('progress', { step: 14, total: 16, message: 'Cleaning up...', buildId, sessionId });
+          clearTimeout(cleanupTimer);
+          await cleanupTempDirectory(buildId);
+
+          sendEvent('progress', { step: 15, total: 16, message: `🎉 Live at: ${previewUrl}`, buildId, sessionId });
+
+          const totalDuration = Date.now() - startTime;
+
+          sendEvent('complete', {
+            success: true,
+            data: {
+              workflow: "enhanced-url-manager-modification",
+              approach: result.approach || 'UNKNOWN',
+              selectedFiles: result.selectedFiles || [],
+              addedFiles: result.addedFiles || [],
+              modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (result.modifiedRanges?.length || 0),
+              reasoning: result.reasoning,
+              modificationSummary: result.modificationSummary,
+              modificationDuration,
+              totalDuration,
+              totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
+              previewUrl,
+              downloadUrl: urls.downloadUrl,
+              zipUrl,
+              buildId,
+              sessionId,
+              userId,
+              projectId: urlResult.projectId || currentProjectId,
+              projectAction: urlResult.action,
+              skipReason: urlResult.skipReason,
+              duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
+              hosting: "Azure Static Web Apps",
+              features: [
+                "Global CDN",
+                "Auto SSL/HTTPS", 
+                "Custom domains support",
+                "Staging environments",
+              ]
+            }
+          });
+
+          await fileModifier.cleanup();
+
+        } catch (buildError) {
+          console.error(`[${buildId}] Build pipeline failed:`, buildError);
+          clearTimeout(cleanupTimer);
+          await cleanupTempDirectory(buildId);
+
+          sendEvent('complete', {
+            success: true,
+            data: {
+              workflow: "enhanced-url-manager-modification-build-error",
+              approach: result.approach || 'UNKNOWN',
+              buildError: buildError instanceof Error ? buildError.message : 'Build failed',
+              buildId,
+              sessionId,
+              userId,
+              projectId: currentProjectId,
+              message: "Modification completed, but build/deploy failed"
+            }
+          });
+        }
+
+      } else {
+        sendEvent('error', {
+          success: false,
+          error: result.error || 'Modification failed',
+          approach: result.approach,
+          reasoning: result.reasoning,
+          buildId,
+          sessionId,
+          userId,
+          projectId: currentProjectId
+        });
+
+        clearTimeout(cleanupTimer);
+        await cleanupTempDirectory(buildId);
+        await fileModifier.cleanup();
+      }
+
+    } catch (error: any) {
+      console.error(`[${buildId}] ❌ Error:`, error);
+      clearTimeout(cleanupTimer);
+      await cleanupTempDirectory(buildId);
+
       sendEvent('error', {
         success: false,
-        error: result.error || 'Modification failed',
-        approach: result.approach,
-        reasoning: result.reasoning,
+        error: 'Internal server error during modification',
+        details: error.message,
         buildId,
         sessionId,
         userId
       });
-
-      clearTimeout(cleanupTimer);
-      await cleanupTempDirectory(buildId);
-      await fileModifier.cleanup();
+    } finally {
+      res.end();
     }
+  });
 
-  } catch (error: any) {
-    console.error(`[${buildId}] ❌ Error:`, error);
-    clearTimeout(cleanupTimer);
-    await cleanupTempDirectory(buildId);
-
-    sendEvent('error', {
-      success: false,
-      error: 'Internal server error during modification',
-      details: error.message,
-      buildId,
-      sessionId,
-      userId
-    });
-  } finally {
-    res.end();
-  }
-});
-
-
-  // NON-STREAMING MODIFICATION ENDPOINT WITH DYNAMIC USER HANDLING
+  // NON-STREAMING MODIFICATION ENDPOINT
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     try {
       const { 
         prompt, 
         sessionId: clientSessionId,
-        userId: providedUserId // This can be undefined, null, or a number
+        userId: providedUserId
       } = req.body;
       
       if (!prompt) {
@@ -621,31 +621,52 @@ export function initializeModificationRoutes(
       }, 5 * 60 * 1000);
 
       try {
-        // Get user's most recent project
+        // RESOLVE CURRENT PROJECT ID FOR UPDATING
+        const { projectId: currentProjectId, project: currentProject } = await resolveCurrentProject(
+          messageDB, 
+          urlManager, 
+          userId, 
+          sessionId
+        );
+
+        // Enhanced project resolution using URL manager
         let sessionContext = await sessionManager.getSessionContext(sessionId);
-        let tempBuildDir: string;
+        let tempBuildDir: string = "";
+        let targetProject = currentProject;
         
-        const userProjects = await messageDB.getUserProjects(userId);
-        if (userProjects.length > 0 && userProjects[0].zipUrl) {
-          console.log(`[${buildId}] Found user's project: ${userProjects[0].name}`);
-          tempBuildDir = await downloadAndExtractProject(buildId, userProjects[0].zipUrl);
-          sessionContext = {
-            buildId,
-            tempBuildDir,
-            projectSummary: {
-              summary: userProjects[0].description || 'User project',
-              zipUrl: userProjects[0].zipUrl,
-              buildId: userProjects[0].buildId
-            },
-            lastActivity: Date.now()
-          };
-          await sessionManager.saveSessionContext(sessionId, sessionContext);
+        // Proper tempBuildDir assignment logic
+        if (currentProjectId) {
+          console.log(`[${buildId}] Using current project ID: ${currentProjectId}`);
+          const projectUrls = await urlManager.getProjectUrls({ projectId: currentProjectId });
+          if (projectUrls && projectUrls.zipUrl) {
+            tempBuildDir = await downloadAndExtractProject(buildId, projectUrls.zipUrl);
+            targetProject = currentProject;
+            sessionContext = {
+              buildId,
+              tempBuildDir,
+              projectSummary: {
+                summary: currentProject?.description || 'Project modification',
+                zipUrl: projectUrls.zipUrl,
+                buildId: projectUrls.buildId
+              },
+              lastActivity: Date.now()
+            };
+            await sessionManager.saveSessionContext(sessionId, sessionContext);
+          } else {
+            // Fallback if current project has no zipUrl
+            console.log(`[${buildId}] Current project ${currentProjectId} has no zipUrl, using template`);
+            const sourceTemplateDir = path.join(__dirname, "../../react-base");
+            tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
+            await fs.promises.mkdir(tempBuildDir, { recursive: true });
+            await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+          }
         } else {
-          // Fallback to existing logic
+          // Fallback logic - check session context first
           sessionContext = await sessionManager.getSessionContext(sessionId);
           if (sessionContext && sessionContext.projectSummary && sessionContext.projectSummary.zipUrl) {
             tempBuildDir = await downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
           } else {
+            // Check for active project summary
             const projectSummary = await messageDB.getActiveProjectSummary();
             
             if (projectSummary && projectSummary.zipUrl) {
@@ -662,9 +683,10 @@ export function initializeModificationRoutes(
               };
               await sessionManager.saveSessionContext(sessionId, sessionContext);
             } else {
+              // Final fallback - use template
+              console.log(`[${buildId}] No existing project found, using template`);
               const sourceTemplateDir = path.join(__dirname, "../../react-base");
               tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
-
               await fs.promises.mkdir(tempBuildDir, { recursive: true });
               await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
 
@@ -677,6 +699,24 @@ export function initializeModificationRoutes(
             }
           }
         }
+
+        // Ensure tempBuildDir is assigned before continuing
+        if (!tempBuildDir) {
+          console.error(`[${buildId}] ❌ tempBuildDir not assigned, creating fallback`);
+          const sourceTemplateDir = path.join(__dirname, "../../react-base");
+          tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
+          await fs.promises.mkdir(tempBuildDir, { recursive: true });
+          await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+          
+          sessionContext = {
+            buildId,
+            tempBuildDir,
+            lastActivity: Date.now()
+          };
+          await sessionManager.saveSessionContext(sessionId, sessionContext);
+        }
+
+        console.log(`[${buildId}] ✅ tempBuildDir assigned: ${tempBuildDir}`);
 
         // Update session
         await sessionManager.updateSessionContext(sessionId, { 
@@ -784,23 +824,48 @@ export function initializeModificationRoutes(
               }
             }
 
-            // DYNAMIC URL SAVING BY USER ID
-            console.log(`[${buildId}] 💾 Saving deployment URLs for user ${userId}...`);
+            // USE ENHANCED URL MANAGER - UPDATE EXISTING PROJECT
+            console.log(`[${buildId}] 💾 Using Enhanced URL Manager for modification...`);
             
-            const urlResult = await saveProjectUrlsByUserId(
-              messageDB,
-              userId,
-              buildId,
-              {
-                deploymentUrl: previewUrl as string,
-                downloadUrl: urls.downloadUrl,
-                zipUrl: zipUrl
-              },
-              sessionId,
-              prompt
-            );
+            let urlResult: any = { action: 'no_project_to_update', projectId: null };
+            
+            if (currentProjectId) {
+              try {
+                const updatedProjectId = await urlManager.saveNewProjectUrls(
+                  sessionId,
+                  currentProjectId,
+                  {
+                    deploymentUrl: previewUrl as string,
+                    downloadUrl: urls.downloadUrl,
+                    zipUrl: zipUrl
+                  },
+                  userId,
+                  {
+                    name: targetProject?.name,
+                    description: targetProject?.description,
+                    framework: targetProject?.framework || 'react',
+                    template: targetProject?.template || 'vite-react-ts'
+                  }
+                );
 
-            console.log(`[${buildId}] ✅ URLs ${urlResult.action} - Project ID: ${urlResult.projectId}`);
+                urlResult = { 
+                  action: 'updated', 
+                  projectId: updatedProjectId,
+                  skipReason: null 
+                };
+                console.log(`[${buildId}] ✅ Updated existing project: ${updatedProjectId}`);
+                
+              } catch (updateError) {
+                console.error(`[${buildId}] ❌ Failed to update project URLs:`, updateError);
+                urlResult = { 
+                  action: 'update_failed', 
+                  projectId: currentProjectId,
+                  error: updateError instanceof Error ? updateError.message : 'Unknown error'
+                };
+              }
+            } else {
+              console.warn(`[${buildId}] ⚠️ No current project ID available for update`);
+            }
 
             // Cleanup
             clearTimeout(cleanupTimer);
@@ -812,7 +877,7 @@ export function initializeModificationRoutes(
             res.json({
               success: true,
               data: {
-                workflow: "dynamic-user-based-modification",
+                workflow: "enhanced-url-manager-modification",
                 approach: result.approach || 'UNKNOWN',
                 selectedFiles: result.selectedFiles || [],
                 addedFiles: result.addedFiles || [],
@@ -821,7 +886,6 @@ export function initializeModificationRoutes(
                 reasoning: result.reasoning,
                 modificationSummary: result.modificationSummary,
                 modificationDuration: modificationDuration,
-                totalDuration: totalDuration,
                 totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
                 previewUrl: previewUrl,
                 downloadUrl: urls.downloadUrl,
@@ -829,8 +893,10 @@ export function initializeModificationRoutes(
                 buildId: buildId,
                 sessionId: sessionId,
                 userId: userId,
-                projectId: urlResult.projectId,
+                projectId: urlResult.projectId || currentProjectId,
                 projectAction: urlResult.action,
+                skipReason: urlResult.skipReason,
+                duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking",
                 hosting: "Azure Static Web Apps",
                 features: [
                   "Global CDN",
@@ -838,7 +904,8 @@ export function initializeModificationRoutes(
                   "Custom domains support",
                   "Staging environments",
                 ],
-                projectState: sessionContext?.projectSummary ? 'existing_project_modified' : 'new_project_created'
+                projectState: currentProjectId ? 'existing_project_modified' : 'new_project_created',
+                tempBuildDirPath: tempBuildDir
               }
             });
 
@@ -852,7 +919,7 @@ export function initializeModificationRoutes(
             res.json({
               success: true,
               data: {
-                workflow: "dynamic-user-based-modification-error",
+                workflow: "enhanced-url-manager-modification-build-error",
                 approach: result.approach || 'UNKNOWN',
                 selectedFiles: result.selectedFiles || [],
                 addedFiles: result.addedFiles || [],
@@ -861,8 +928,10 @@ export function initializeModificationRoutes(
                 buildId: buildId,
                 sessionId: sessionId,
                 userId: userId,
+                projectId: currentProjectId,
                 message: "Modification completed successfully, but build/deploy failed",
-                projectState: sessionContext?.projectSummary ? 'existing_project_modified' : 'new_project_created'
+                projectState: currentProjectId ? 'existing_project_modified' : 'new_project_created',
+                tempBuildDirPath: tempBuildDir
               }
             });
           }
@@ -892,11 +961,13 @@ export function initializeModificationRoutes(
             approach: result.approach,
             reasoning: result.reasoning,
             selectedFiles: result.selectedFiles || [],
-            workflow: "dynamic-user-based-modification",
+            workflow: "enhanced-url-manager-modification",
             buildId: buildId,
             sessionId: sessionId,
             userId: userId,
-            projectState: sessionContext?.projectSummary ? 'existing_project_failed' : 'new_project_failed'
+            projectId: currentProjectId,
+            projectState: currentProjectId ? 'existing_project_failed' : 'new_project_failed',
+            tempBuildDirPath: tempBuildDir
           });
         }
 
@@ -909,7 +980,7 @@ export function initializeModificationRoutes(
           success: false,
           error: 'Failed to setup project environment',
           details: downloadError instanceof Error ? downloadError.message : 'Unknown error',
-          workflow: "dynamic-user-based-modification",
+          workflow: "enhanced-url-manager-modification",
           buildId: buildId,
           sessionId: sessionId,
           userId: userId
@@ -924,7 +995,7 @@ export function initializeModificationRoutes(
         success: false,
         error: 'Internal server error during modification',
         details: error.message,
-        workflow: "dynamic-user-based-modification",
+        workflow: "enhanced-url-manager-modification",
         buildId: buildId,
         sessionId: sessionId,
         userId: req.body.userId || 'unresolved'
@@ -932,7 +1003,7 @@ export function initializeModificationRoutes(
     }
   });
 
-  // UPDATED ENDPOINT TO GET USER'S PROJECTS WITH DYNAMIC USER RESOLUTION
+  // GET USER'S PROJECTS ENDPOINT
   router.get("/user/:userId/projects", async (req: Request, res: Response): Promise<void> => {
     try {
       const { userId: paramUserId } = req.params;
@@ -950,6 +1021,9 @@ export function initializeModificationRoutes(
       const resolvedUserId = await resolveUserId(messageDB, userId);
       const projects = await messageDB.getUserProjects(resolvedUserId);
 
+      // Get additional stats using URL manager
+      const stats = await urlManager.getUserProjectStats(resolvedUserId);
+
       res.json({
         success: true,
         data: projects.map(project => ({
@@ -965,11 +1039,14 @@ export function initializeModificationRoutes(
           template: project.template,
           messageCount: project.messageCount,
           lastMessageAt: project.lastMessageAt,
+          conversationTitle: project.conversationTitle,
           createdAt: project.createdAt,
           updatedAt: project.updatedAt
         })),
         userId: resolvedUserId,
-        totalProjects: projects.length
+        totalProjects: projects.length,
+        stats: stats,
+        duplicatePrevention: "Enhanced URL Manager with comprehensive duplicate checking"
       });
     } catch (error) {
       res.status(500).json({
@@ -980,32 +1057,30 @@ export function initializeModificationRoutes(
     }
   });
 
-  // NEW ENDPOINT TO GET OR CREATE USER
-  router.post("/user/ensure", async (req: Request, res: Response): Promise<void> => {
+  // GET PROJECT URLS ENDPOINT
+  router.get("/project/:projectId/urls", async (req: Request, res: Response): Promise<void> => {
     try {
-      const { userId, userData } = req.body;
+      const { projectId } = req.params;
+      const projectUrls = await urlManager.getProjectUrls({ 
+        projectId: parseInt(projectId) 
+      });
 
-      if (!userId) {
-        res.status(400).json({
+      if (!projectUrls) {
+        res.status(404).json({
           success: false,
-          error: 'User ID is required'
+          error: 'Project not found'
         });
         return;
       }
 
-      const resolvedUserId = await messageDB.ensureUserExists(parseInt(userId), userData);
-
       res.json({
         success: true,
-        data: {
-          userId: resolvedUserId,
-          action: resolvedUserId === parseInt(userId) ? 'existed' : 'created'
-        }
+        data: projectUrls
       });
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: 'Failed to ensure user exists',
+        error: 'Failed to get project URLs',
         details: error instanceof Error ? error.message : 'Unknown error'
       });
     }

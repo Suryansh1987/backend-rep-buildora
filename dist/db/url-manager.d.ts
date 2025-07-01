@@ -5,23 +5,18 @@ export declare class EnhancedProjectUrlManager {
     /**
      * Main method to save or update project URLs with comprehensive identification and duplicate prevention
      */
-    saveOrUpdateProjectUrls(sessionId: string, buildId: string, urls: {
-        deploymentUrl: string;
-        downloadUrl: string;
-        zipUrl: string;
-    }, context: {
-        projectId?: number;
-        userId?: number;
-        isModification?: boolean;
-        prompt?: string;
-        name?: string;
-        description?: string;
-        framework?: string;
-        template?: string;
-    }): Promise<{
-        projectId: number;
-        action: 'created' | 'updated';
-    }>;
+    /**
+     * Resolve user ID with proper fallback strategies
+     */
+    private resolveUserId;
+    /**
+     * Comprehensive duplicate checking with multiple criteria
+     */
+    private comprehensiveDuplicateCheck;
+    /**
+     * Check if project needs URL update
+     */
+    private needsUrlUpdate;
     /**
      * Find project for modification with comprehensive fallback strategies
      */
@@ -29,19 +24,17 @@ export declare class EnhancedProjectUrlManager {
     /**
      * Get project by ID with error handling
      */
-    private getProjectById;
     /**
      * Update existing project with new URLs and metadata
      */
     private updateExistingProject;
     /**
-     * Create new project with comprehensive metadata, user validation, and duplicate checking
+     * Create new project safely with comprehensive error handling and transaction-like behavior
      */
-    private createNewProjectWithDuplicateCheck;
     /**
-     * DEPRECATED: Use createNewProjectWithDuplicateCheck instead
+     * Emergency method to find recently created project
      */
-    private createNewProject;
+    private findRecentlyCreatedProject;
     /**
      * Generate a smart project name from prompt
      */
@@ -51,11 +44,7 @@ export declare class EnhancedProjectUrlManager {
      */
     private generateProjectDescription;
     /**
-     * Update conversation title based on latest prompt
-     */
-    private updateConversationTitle;
-    /**
-     * Get project URLs by various identifiers
+     * Public method to get project URLs by various identifiers
      */
     getProjectUrls(identifier: {
         projectId?: number;
@@ -71,17 +60,19 @@ export declare class EnhancedProjectUrlManager {
         lastSessionId: string;
     } | null>;
     /**
-     * Link a session to an existing project
+     * Simple method for generation route (no complex duplicate checking needed for new projects)
      */
-    linkSessionToProject(sessionId: string, projectId: number): Promise<void>;
-    /**
-     * Get project deployment history
-     */
-    getProjectDeploymentHistory(projectId: number): Promise<any[]>;
-    /**
-     * Validate project ownership
-     */
-    validateProjectOwnership(projectId: number, userId: number): Promise<boolean>;
+    saveNewProjectUrls(sessionId: string, projectId: number, urls: {
+        deploymentUrl: string;
+        downloadUrl: string;
+        zipUrl: string;
+    }, userId: number, projectData: {
+        name?: string;
+        description?: string;
+        framework?: string;
+        template?: string;
+    }): Promise<number>;
+    getProjectById(projectId: number): Promise<any>;
     /**
      * Get user's project statistics
      */
@@ -95,20 +86,4 @@ export declare class EnhancedProjectUrlManager {
      * Clean up old projects for a user (keep only latest N projects)
      */
     cleanupUserProjects(userId: number, keepLatest?: number): Promise<number>;
-    /**
-     * Get projects by status
-     */
-    getProjectsByStatus(status: string, limit?: number): Promise<any[]>;
-    /**
-     * Search projects by name or description
-     */
-    searchProjects(query: string, userId?: number): Promise<any[]>;
-    /**
-     * Get project build history
-     */
-    getProjectBuilds(projectId: number): Promise<any[]>;
-    /**
-     * Check for duplicate projects before creation
-     */
-    checkForDuplicates(sessionId: string, buildId: string, userId?: number): Promise<any>;
 }

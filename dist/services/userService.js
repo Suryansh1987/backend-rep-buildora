@@ -10,7 +10,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const db_1 = require("../db");
-const project_schema_1 = require("../db/project_schema");
+const message_schema_1 = require("../db/message_schema");
 const drizzle_orm_1 = require("drizzle-orm");
 class UserService {
     createOrUpdateUser(userData) {
@@ -19,13 +19,13 @@ class UserService {
                 // Check if user exists
                 const existingUser = yield db_1.db
                     .select()
-                    .from(project_schema_1.users)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.users.clerkId, userData.clerkId))
+                    .from(message_schema_1.users)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.users.clerkId, userData.clerkId))
                     .limit(1);
                 if (existingUser.length > 0) {
                     // Update existing user
                     const updatedUser = yield db_1.db
-                        .update(project_schema_1.users)
+                        .update(message_schema_1.users)
                         .set({
                         email: userData.email,
                         name: userData.name,
@@ -33,14 +33,14 @@ class UserService {
                         profileImage: userData.profileImage,
                         updatedAt: new Date(),
                     })
-                        .where((0, drizzle_orm_1.eq)(project_schema_1.users.clerkId, userData.clerkId))
+                        .where((0, drizzle_orm_1.eq)(message_schema_1.users.clerkId, userData.clerkId))
                         .returning();
                     return updatedUser[0];
                 }
                 else {
                     // Create new user
                     const newUser = yield db_1.db
-                        .insert(project_schema_1.users)
+                        .insert(message_schema_1.users)
                         .values(userData)
                         .returning();
                     return newUser[0];
@@ -57,8 +57,8 @@ class UserService {
             try {
                 const user = yield db_1.db
                     .select()
-                    .from(project_schema_1.users)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.users.clerkId, clerkId))
+                    .from(message_schema_1.users)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.users.clerkId, clerkId))
                     .limit(1);
                 return user[0] || null;
             }
@@ -73,8 +73,8 @@ class UserService {
             try {
                 const user = yield db_1.db
                     .select()
-                    .from(project_schema_1.users)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.users.id, id))
+                    .from(message_schema_1.users)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.users.id, id))
                     .limit(1);
                 return user[0] || null;
             }

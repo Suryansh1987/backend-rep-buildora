@@ -1,5 +1,5 @@
 import { db } from '../db';
-import { users, type User, type NewUser } from '../db/project_schema';
+import { users, type User, type NewUser } from '../db/message_schema';
 import { eq } from 'drizzle-orm';
 
 class UserService {

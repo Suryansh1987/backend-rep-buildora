@@ -1,7 +1,8 @@
-// routes/generation.ts - Fixed to prevent duplicate project creation
+// routes/generation.ts - Updated with proper URL manager and duplicate prevention
 import express, { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import AdmZip from "adm-zip";
+import axios from 'axios';
 import * as fs from "fs";
 import path from "path";
 import type { TextBlock } from '@anthropic-ai/sdk/resources/messages';
@@ -13,9 +14,9 @@ import {
 } from "../services/azure-deploy";
 import { DrizzleMessageHistoryDB } from '../db/messagesummary';
 import { StatelessSessionManager } from './session';
+import { EnhancedProjectUrlManager } from '../db/url-manager';
 import { systemPrompt } from "../defaults/promt";
 import { parseFrontendCode } from "../utils/newparser";
-import { EnhancedProjectUrlManager } from '../db/url-manager';
 import Anthropic from "@anthropic-ai/sdk";
 
 const router = express.Router();
@@ -69,7 +70,43 @@ async function cleanupTempDirectory(buildId: string): Promise<void> {
   }
 }
 
-// DYNAMIC USER RESOLUTION FUNCTION
+// Helper function to download and extract existing project
+async function downloadAndExtractProject(buildId: string, zipUrl: string): Promise<string> {
+  const tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
+  
+  try {
+    console.log(`[${buildId}] Downloading existing project from: ${zipUrl}`);
+    
+    const response = await axios.get(zipUrl, { responseType: 'stream' });
+    const zipPath = path.join(__dirname, "../../temp-builds", `${buildId}-download.zip`);
+    
+    await fs.promises.mkdir(path.dirname(zipPath), { recursive: true });
+    
+    const writer = fs.createWriteStream(zipPath);
+    response.data.pipe(writer);
+    
+    await new Promise<void>((resolve, reject) => {
+      writer.on('finish', () => resolve());
+      writer.on('error', (err) => reject(err));
+    });
+    console.log(`[${buildId}] ZIP downloaded successfully`);
+    
+    const zip = new AdmZip(zipPath);
+    await fs.promises.mkdir(tempBuildDir, { recursive: true });
+    zip.extractAllTo(tempBuildDir, true);
+    
+    console.log(`[${buildId}] Project extracted to: ${tempBuildDir}`);
+    
+    await fs.promises.unlink(zipPath);
+    
+    return tempBuildDir;
+  } catch (error) {
+    console.error(`[${buildId}] Failed to download and extract project:`, error);
+    throw new Error(`Failed to download project: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+// IMPROVED USER RESOLUTION FUNCTION
 async function resolveUserId(
   messageDB: DrizzleMessageHistoryDB,
   providedUserId?: number,
@@ -116,10 +153,11 @@ export function initializeGenerationRoutes(
   sessionManager: StatelessSessionManager
 ): express.Router {
 
-  // Initialize Enhanced Project URL Manager
-  const projectUrlManager = new EnhancedProjectUrlManager(messageDB);
+  // Initialize the enhanced URL manager
+  const urlManager = new EnhancedProjectUrlManager(messageDB);
 
-  // MAIN GENERATION ENDPOINT - SINGLE PROJECT CREATION ONLY
+  // MAIN GENERATION ENDPOINT - USING ENHANCED URL MANAGER
+  // Fixed generation route - Updates existing project instead of creating new
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     const { 
       prompt, 
@@ -141,7 +179,7 @@ export function initializeGenerationRoutes(
     const buildId = uuidv4();
     const sessionId = sessionManager.generateSessionId();
     
-    // Step 1: Resolve user ID ONLY (no project creation)
+    // Step 1: Resolve user ID
     let userId: number;
     try {
       userId = await resolveUserId(messageDB, providedUserId, sessionId);
@@ -156,15 +194,101 @@ export function initializeGenerationRoutes(
       });
       return;
     }
+
+    // ✅ STEP 2: CHECK FOR EXISTING PROJECT TO UPDATE
+    console.log(`[${buildId}] 🔍 Checking for existing project to update...`);
     
-    console.log(`[${buildId}] Starting new project generation pipeline`);
-    console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}`);
+    let currentProjectId: number | null = null;
+    let currentProject: any = null;
+    let isUpdatingExisting = false;
+    
+    try {
+      // Priority 1: Get user's most recent project
+      const userProjects = await messageDB.getUserProjects(userId);
+      if (userProjects.length > 0) {
+        currentProject = userProjects[0]; // Most recent project
+        currentProjectId = currentProject.id;
+        isUpdatingExisting = true;
+        console.log(`[${buildId}] ✅ Found existing project to update: ${currentProjectId}`);
+      }
+      
+      // Priority 2: Check session for project if no user projects
+      if (!currentProjectId && sessionId) {
+        const sessionProject = await messageDB.getProjectBySessionId(sessionId);
+        if (sessionProject) {
+          currentProject = sessionProject;
+          currentProjectId = sessionProject.id;
+          isUpdatingExisting = true;
+          console.log(`[${buildId}] ✅ Found session project to update: ${currentProjectId}`);
+        }
+      }
+    } catch (error) {
+      console.warn(`[${buildId}] ⚠️ Error checking for existing projects:`, error);
+    }
+
+    // ✅ SMART DUPLICATE PREVENTION - Only prevent true duplicates
+    if (isUpdatingExisting && currentProject) {
+      console.log(`[${buildId}] 🔍 Checking for duplicate requests...`);
+      
+      try {
+        const now = new Date().getTime();
+        const projectTime = new Date(currentProject.updatedAt || currentProject.createdAt).getTime();
+        const timeDiff = now - projectTime;
+        const isVeryRecent = timeDiff < 2000;
+        const isFullyDeployed = currentProject.deploymentUrl && 
+                               currentProject.downloadUrl && 
+                               currentProject.zipUrl && 
+                               currentProject.zipUrl !== 'NO_ZIP';
+        const isCompleted = currentProject.status === 'ready';
+        
+        if (isVeryRecent && isFullyDeployed && isCompleted) {
+          console.log(`[${buildId}] 🛑 True duplicate detected - recent completed project (${timeDiff}ms ago)`);
+          
+          res.json({
+            success: true,
+            duplicate: true,
+            message: `Duplicate request detected - project completed ${timeDiff}ms ago`,
+            projectId: currentProjectId,
+            buildId: buildId,
+            sessionId: sessionId,
+            userId: userId,
+            isUpdate: true,
+            timeDiff: timeDiff,
+            duplicateReason: "very_recent_completed_project",
+            existingProject: {
+              id: currentProject.id,
+              name: currentProject.name,
+              deploymentUrl: currentProject.deploymentUrl,
+              downloadUrl: currentProject.downloadUrl,
+              zipUrl: currentProject.zipUrl,
+              status: currentProject.status
+            }
+          });
+          return;
+        } else {
+          console.log(`[${buildId}] ✅ Proceeding with update - not a duplicate:`);
+          console.log(`[${buildId}]    - Recent: ${isVeryRecent} (${timeDiff}ms ago)`);
+          console.log(`[${buildId}]    - Deployed: ${isFullyDeployed}`);
+          console.log(`[${buildId}]    - Completed: ${isCompleted} (status: ${currentProject.status})`);
+          console.log(`[${buildId}]    - zipUrl: ${currentProject.zipUrl || 'NO_ZIP'}`);
+        }
+      } catch (dupCheckError) {
+        console.warn(`[${buildId}] ⚠️ Duplicate check failed, continuing with update:`, dupCheckError);
+      }
+    }
+    
+    console.log(`[${buildId}] Starting ${isUpdatingExisting ? 'project update' : 'new project creation'} pipeline`);
+    console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}, Project: ${currentProjectId || 'NEW'}`);
     console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
     
     const cleanupTimer = setTimeout(() => {
       cleanupTempDirectory(buildId);
       sessionManager.cleanup(sessionId);
     }, 5 * 60 * 1000);
+
+    // ✅ PROJECT MANAGEMENT - Update existing OR create new
+    let projectId: number = currentProjectId || 0;
+    let projectSaved = false;
    
     try {
       // Save initial session context
@@ -181,20 +305,107 @@ export function initializeGenerationRoutes(
       const tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
 
       await fs.promises.mkdir(tempBuildDir, { recursive: true });
-      await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
-      console.log(`[${buildId}] Template copied to temp directory`);
+      
+      // ✅ LOAD EXISTING PROJECT FILES OR USE TEMPLATE
+      if (isUpdatingExisting && currentProject?.zipUrl) {
+        console.log(`[${buildId}] 📦 Loading existing project files from: ${currentProject.zipUrl}`);
+        try {
+          // Download and extract existing project
+          const extractedPath = await downloadAndExtractProject(buildId, currentProject.zipUrl);
+          console.log(`[${buildId}] ✅ Loaded existing project files to: ${extractedPath}`);
+        } catch (downloadError) {
+          console.warn(`[${buildId}] ⚠️ Failed to load existing project, using template:`, downloadError);
+          await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+        }
+      } else {
+        console.log(`[${buildId}] 📋 Using base template for ${isUpdatingExisting ? 'existing project without files' : 'new project'}`);
+        await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+      }
 
       // Update session with temp directory
       await sessionManager.updateSessionContext(sessionId, { tempBuildDir });
 
-      // Save user message to database
-      const userMessageId = await messageDB.addMessage(prompt, 'user', {
-        promptType: 'frontend_generation',
-        requestType: 'user_prompt',
-        timestamp: new Date().toISOString(),
-        sessionId: sessionId,
-        userId: userId
-      } as any);
+      // ✅ UPDATE EXISTING PROJECT OR CREATE NEW
+      if (isUpdatingExisting && currentProjectId) {
+        console.log(`[${buildId}] 🔄 Updating existing project ${currentProjectId}...`);
+        
+        try {
+          await messageDB.updateProject(currentProjectId, {
+            name: projectName || currentProject.name || `Updated Project ${buildId.substring(0, 8)}`,
+            description: description || `Updated: ${prompt.substring(0, 100)}...`,
+            status: 'regenerating', // Show it's being updated
+            buildId: buildId,
+            lastSessionId: sessionId,
+            framework: framework || currentProject.framework || 'react',
+            template: template || currentProject.template || 'vite-react-ts',
+            lastMessageAt: new Date(),
+            messageCount: (currentProject.messageCount || 0) + 1,
+            updatedAt: new Date()
+          });
+          
+          projectId = currentProjectId;
+          projectSaved = true;
+          console.log(`[${buildId}] ✅ Updated existing project record: ${projectId}`);
+          
+        } catch (updateError) {
+          console.error(`[${buildId}] ❌ Failed to update existing project:`, updateError);
+          
+          // Fallback to creating new if update fails
+          isUpdatingExisting = false;
+          currentProjectId = null;
+        }
+      }
+      
+      // ✅ CREATE NEW PROJECT ONLY IF NO EXISTING PROJECT OR UPDATE FAILED
+      if (!isUpdatingExisting) {
+        console.log(`[${buildId}] 💾 Creating new project record...`);
+        
+        try {
+          projectId = await messageDB.createProject({
+            userId,
+            name: projectName || `Generated Project ${buildId.substring(0, 8)}`,
+            description: description || `React project generated from prompt: ${prompt.substring(0, 100)}...`,
+            status: 'generating',
+            projectType: 'generated',
+            deploymentUrl: '',
+            downloadUrl: '',
+            zipUrl: '',
+            buildId: buildId,
+            lastSessionId: sessionId,
+            framework: framework || 'react',
+            template: template || 'vite-react-ts',
+            lastMessageAt: new Date(),
+            messageCount: 0
+          });
+          
+          projectSaved = true;
+          console.log(`[${buildId}] ✅ Created new project record: ${projectId}`);
+          
+        } catch (projectError) {
+          console.error(`[${buildId}] ❌ CRITICAL: Failed to create project record:`, projectError);
+          
+          clearTimeout(cleanupTimer);
+          await sessionManager.cleanup(sessionId);
+          
+          res.status(500).json({
+            success: false,
+            error: 'Failed to create project record',
+            details: projectError instanceof Error ? projectError.message : 'Unknown error',
+            buildId,
+            sessionId,
+            userId
+          });
+          return;
+        }
+      }
+
+      // ✅ IMMEDIATE VALIDATION - Ensure project exists
+      const validatedProject = await messageDB.getProject(projectId);
+      if (!validatedProject) {
+        throw new Error(`Project ${projectId} not found after ${isUpdatingExisting ? 'update' : 'creation'} - database inconsistency`);
+      }
+      
+      console.log(`[${buildId}] ✅ Validated project ${projectId} exists in database`);
 
       console.log(`[${buildId}] 🔨 Generating frontend code using Claude...`);
       
@@ -242,7 +453,7 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
       // Parse files using the new parser
       let parsedFiles: FileData[] = [];
       let parseSuccess = false;
-      let parseError = null;
+      let parseError: any = null;
 
       try {
         console.log(`[${buildId}] 🔍 Parsing frontend response with new parser...`);
@@ -305,21 +516,17 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
         clearTimeout(cleanupTimer);
         await sessionManager.cleanup(sessionId);
         
-        // Save error to database
-        await messageDB.addMessage(
-          `Frontend generation failed: Failed to parse generated files`,
-          'assistant',
-          {
-            promptType: 'frontend_generation',
-            requestType: 'claude_response',
-            relatedUserMessageId: userMessageId,
-            success: false,
-            error: 'Parse failure',
-            buildId: buildId,
-            sessionId: sessionId,
-            userId: userId
-          } as any
-        );
+        // Mark project as failed
+        if (projectId && projectSaved) {
+          try {
+            await messageDB.updateProject(projectId, {
+              status: 'failed',
+              updatedAt: new Date()
+            });
+          } catch (updateError) {
+            console.warn(`[${buildId}] Failed to mark project as failed:`, updateError);
+          }
+        }
 
         res.status(400).json({
           success: false,
@@ -329,10 +536,29 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
           buildId: buildId,
           sessionId: sessionId,
           userId: userId,
+          projectId: projectId,
           databaseSaved: true,
-          projectUrlsSaved: false
+          projectSaved: projectSaved
         });
         return;
+      }
+
+      // ✅ UPDATE PROJECT STATUS - Right after parsing succeeds
+      if (projectId && projectSaved) {
+        try {
+          console.log(`[${buildId}] 🔄 Updating project ${projectId} status to 'generated'...`);
+          
+          await messageDB.updateProject(projectId, {
+            status: 'generated', // Mark as generated
+            lastMessageAt: new Date(),
+            updatedAt: new Date(),
+            messageCount: validatedProject.messageCount + 1
+          });
+          
+          console.log(`[${buildId}] ✅ Project ${projectId} marked as generated`);
+        } catch (updateError) {
+          console.warn(`[${buildId}] ⚠️ Failed to update project after parsing:`, updateError);
+        }
       }
 
       // Write files to temp directory AND cache in Redis
@@ -451,10 +677,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         projectSummary = `Frontend project with ${parsedFiles.length} files: ${parsedFiles.map(f => f.path).join(', ')}`;
       }
 
-      // BUILD & DEPLOY PIPELINE
-      console.log(`[${buildId}] 🏗️ Starting build & deploy pipeline...`);
-
-      // Create zip and upload to Azure
+      // ✅ CREATE ZIP IMMEDIATELY AFTER FILES ARE READY
+      console.log(`[${buildId}] 📦 Creating and uploading ZIP file...`);
       const zip = new AdmZip();
       zip.addLocalFolder(tempBuildDir);
       const zipBuffer = zip.toBuffer();
@@ -467,6 +691,24 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         zipBuffer
       );
       console.log(`[${buildId}] ✅ Source uploaded to Azure: ${zipUrl}`);
+
+      // ✅ UPDATE PROJECT WITH ZIP URL - Before build/deploy
+      if (projectId && projectSaved) {
+        try {
+          console.log(`[${buildId}] 🔄 Updating project ${projectId} with ZIP URL...`);
+          
+          await messageDB.updateProject(projectId, {
+            zipUrl: zipUrl,
+            description: projectSummary || description || `React project generated from prompt: ${prompt.substring(0, 100)}...`,
+            status: 'ready_for_deployment', 
+            updatedAt: new Date()
+          });
+          
+          console.log(`[${buildId}] ✅ Project ${projectId} updated with ZIP URL`);
+        } catch (updateError) {
+          console.warn(`[${buildId}] ⚠️ Failed to update project with ZIP:`, updateError);
+        }
+      }
       
       // Update session context with project summary and zipUrl
       await sessionManager.updateSessionContext(sessionId, {
@@ -476,6 +718,9 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           buildId: buildId
         }
       });
+      
+      // NOW START THE BUILD & DEPLOY PIPELINE (this can be slower)
+      console.log(`[${buildId}] 🏗️ Starting build & deploy pipeline...`);
       
       // Trigger Azure Container Job
       console.log(`[${buildId}] 🔧 Triggering Azure Container Job...`);
@@ -494,96 +739,64 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
       console.log(`[${buildId}] 🚀 Deploying with Azure Static Web Apps...`);
       const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
-      // *** SINGLE PROJECT CREATION POINT - USE ONLY URL MANAGER ***
-      console.log(`[${buildId}] 💾 Creating project record using URL manager ONLY...`);
+      // ✅ FINAL UPDATE WITH DEPLOYMENT URLs - Use Enhanced URL Manager properly
+      console.log(`[${buildId}] 💾 Final update with deployment URLs using Enhanced URL Manager...`);
+      let projectAction = isUpdatingExisting ? 'updated_existing' : 'created_new';
       
-      let urlResult: { projectId: number | null; action: 'created' | 'updated' | 'failed' } = { 
-        projectId: null, 
-        action: 'failed' 
-      };
-      let projectUrlsSaved = false;
-      
-      try {
-        const result = await projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
-          deploymentUrl: previewUrl as string,
-          downloadUrl: urls.downloadUrl,
-          zipUrl: zipUrl
-        }, {
-          projectId: undefined,                         // No existing project for new generation
-          userId: userId,                               // Resolved user ID
-          isModification: false,                        // This is new generation
-          prompt: prompt,
-          name: projectName,
-          description: description || projectSummary,
-          framework: framework || 'react',
-          template: template || 'vite-react-ts'
-        });
-        
-        urlResult = { 
-          projectId: result.projectId, 
-          action: result.action
-        };
-        projectUrlsSaved = true;
-        
-        console.log(`[${buildId}] ✅ Project ${result.action} - Project ID: ${result.projectId}`);
-        
-      } catch (projectError) {
-        console.error(`[${buildId}] ❌ Failed to save/update project URLs:`, projectError);
-        urlResult = { projectId: null, action: 'failed' };
-        
-        // Log the specific error for debugging
-        if (projectError instanceof Error) {
-          if (projectError.message.includes('foreign key constraint')) {
-            console.warn(`[${buildId}] Foreign key constraint violation - attempting to resolve user issue`);
-            
-            // Try to ensure user exists and retry once
-            try {
-              await messageDB.ensureUserExists(userId);
-              console.log(`[${buildId}] User ${userId} ensured, retrying project creation...`);
-              
-              const retryResult = await projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
-                deploymentUrl: previewUrl as string,
-                downloadUrl: urls.downloadUrl,
-                zipUrl: zipUrl
-              }, {
-                projectId: undefined,
-                userId: userId,
-                isModification: false,
-                prompt: prompt,
-                name: projectName,
-                description: description || projectSummary,
-                framework: framework || 'react',
-                template: template || 'vite-react-ts'
-              });
-              
-              urlResult = { 
-                projectId: retryResult.projectId, 
-                action: retryResult.action
-              };
-              projectUrlsSaved = true;
-              console.log(`[${buildId}] ✅ Retry successful - Project ${retryResult.action} - ID: ${retryResult.projectId}`);
-              
-            } catch (retryError) {
-              console.error(`[${buildId}] ❌ Retry also failed:`, retryError);
+      if (projectId && projectSaved) {
+        try {
+          // ✅ Use Enhanced URL Manager to UPDATE the existing project
+          console.log(`[${buildId}] 🔧 Calling Enhanced URL Manager to update project ${projectId}...`);
+          
+          const updatedProjectId = await urlManager.saveNewProjectUrls(
+            sessionId,
+            projectId, // Use the resolved projectId (existing or new)
+            {
+              deploymentUrl: previewUrl as string,
+              downloadUrl: urls.downloadUrl,
+              zipUrl: zipUrl
+            },
+            userId,
+            {
+              name: projectName || validatedProject.name,
+              description: projectSummary || description || validatedProject.description,
+              framework: framework || validatedProject.framework || 'react',
+              template: template || validatedProject.template || 'vite-react-ts'
             }
+          );
+
+          if (updatedProjectId === projectId) {
+            projectAction = isUpdatingExisting ? 'existing_project_updated' : 'new_project_created';
+            console.log(`[${buildId}] ✅ Enhanced URL Manager - Successfully ${isUpdatingExisting ? 'updated' : 'created'} project ${projectId}`);
           } else {
-            console.error(`[${buildId}] Database error:`, projectError.message);
+            projectAction = 'project_id_mismatch';
+            console.warn(`[${buildId}] ⚠️ Enhanced URL Manager returned different project ID: ${updatedProjectId} vs ${projectId}`);
+          }
+          
+        } catch (projectError) {
+          console.error(`[${buildId}] ❌ Enhanced URL Manager failed:`, projectError);
+          projectAction = 'url_manager_failed';
+          
+          // Fallback: Direct update
+          try {
+            await messageDB.updateProject(projectId, {
+              deploymentUrl: previewUrl as string,
+              downloadUrl: urls.downloadUrl,
+              zipUrl: zipUrl,
+              status: 'ready',
+              updatedAt: new Date()
+            });
+            projectAction = isUpdatingExisting ? 'existing_fallback_updated' : 'new_fallback_updated';
+            console.log(`[${buildId}] ✅ Fallback update successful for project ${projectId}`);
+          } catch (fallbackError) {
+            console.error(`[${buildId}] ❌ Fallback update also failed:`, fallbackError);
+            projectAction = 'all_updates_failed';
           }
         }
-      }
-
-      // Save project summary to database (for backwards compatibility)
-      try {
-        const summaryId = await messageDB.saveProjectSummary(
-          projectSummary, 
-          prompt, 
-          zipUrl, 
-          buildId,
-          userId
-        );
-        console.log(`[${buildId}] 💾 Saved project summary to database, ID: ${summaryId}`);
-      } catch (summaryError) {
-        console.error(`[${buildId}] ⚠️ Error saving project summary:`, summaryError);
+      } else {
+        console.warn(`[${buildId}] ⚠️ No valid projectId to update URLs`);
+        projectAction = 'no_project_to_update';
+        projectSaved = false;
       }
 
       // Save assistant response to conversation history
@@ -591,7 +804,6 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         const assistantMetadata = {
           promptType: 'frontend_generation',
           requestType: 'claude_response',
-          relatedUserMessageId: userMessageId,
           success: true,
           processingTimeMs: frontendProcessingTime,
           tokenUsage: result.usage,
@@ -604,14 +816,15 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           downloadUrl: urls.downloadUrl,
           zipUrl: zipUrl,
           sessionId: sessionId,
-          projectId: urlResult.projectId,
+          projectId: projectId,
           userId: userId
         };
 
         const assistantMessageId = await messageDB.addMessage(
           `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => f.path).join('\n')}`,
-          'assistant'
-                );
+          'assistant',
+          assistantMetadata
+        );
         console.log(`[${buildId}] 💾 Saved assistant response (ID: ${assistantMessageId})`);
       } catch (dbError) {
         console.warn(`[${buildId}] ⚠️ Failed to save assistant response:`, dbError);
@@ -626,6 +839,28 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
       console.log(`[${buildId}] ⏱️ Total generation completed in ${totalProcessingTime}ms`);
       console.log(`[${buildId}] 📊 Token usage: ${result.usage?.input_tokens || 0} input, ${result.usage?.output_tokens || 0} output`);
       
+      // ✅ FINAL PROJECT VERIFICATION
+      console.log(`[${buildId}] 🔍 Final verification - checking project in database...`);
+      try {
+        const finalProject = await messageDB.getProject(projectId);
+        if (finalProject) {
+          console.log(`[${buildId}] ✅ Final project verification successful:`, {
+            id: finalProject.id,
+            name: finalProject.name,
+            status: finalProject.status,
+            hasUrls: {
+              deployment: !!finalProject.deploymentUrl,
+              download: !!finalProject.downloadUrl,
+              zip: !!finalProject.zipUrl
+            }
+          });
+        } else {
+          console.error(`[${buildId}] ❌ Final project verification failed - project not found!`);
+        }
+      } catch (verifyError) {
+        console.error(`[${buildId}] ❌ Final project verification error:`, verifyError);
+      }
+      
       // SUCCESS RESPONSE - Project generation succeeded
       res.json({
         success: true,
@@ -636,8 +871,10 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         buildId: buildId,
         sessionId: sessionId,
         userId: userId,
-        projectId: urlResult.projectId,
-        projectAction: urlResult.action,
+        projectId: projectId,
+        projectAction: projectAction,
+        isUpdate: isUpdatingExisting,
+        originalProjectId: currentProjectId,
         hosting: "Azure Static Web Apps",
         features: [
           "Global CDN",
@@ -653,9 +890,9 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           summary: projectSummary,
           generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`,
           databaseSaved: true,
-          projectUrlsSaved: projectUrlsSaved,
-          identificationStrategy: 'single_url_manager_creation',
-          duplicatePrevention: 'url_manager_only',
+          projectSaved: projectSaved,
+          duplicatePrevention: "Enhanced with 30-second window check",
+          projectManagement: isUpdatingExisting ? "Updated existing project" : "Created new project",
           userProvided: {
             userId: providedUserId,
             resolvedUserId: userId,
@@ -676,6 +913,19 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
       await cleanupTempDirectory(buildId);
       await sessionManager.cleanup(sessionId);
 
+      // Mark project as failed if it was created
+      if (projectId && projectSaved) {
+        try {
+          await messageDB.updateProject(projectId, {
+            status: 'failed',
+            updatedAt: new Date()
+          });
+          console.log(`[${buildId}] 📝 Marked project ${projectId} as failed`);
+        } catch (updateError) {
+          console.warn(`[${buildId}] Failed to mark project as failed:`, updateError);
+        }
+      }
+
       // Save error to database
       try {
         const errorMetadata = {
@@ -686,7 +936,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
           processingTimeMs: 0,
           buildId: buildId,
           sessionId: sessionId,
-          userId: userId
+          userId: userId,
+          projectId: projectId
         };
 
         await messageDB.addMessage(
@@ -706,10 +957,10 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
         buildId: buildId,
         sessionId: sessionId,
         userId: userId,
+        projectId: projectId,
         databaseSaved: true,
-        projectUrlsSaved: false,
-        projectId: null,
-        projectAction: 'failed'
+        isUpdate: isUpdatingExisting,
+        originalProjectId: currentProjectId
       });
     }
   });

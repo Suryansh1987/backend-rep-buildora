@@ -10,12 +10,11 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DrizzleMessageHistoryDB = void 0;
-// db/Messagesummary.ts - Updated with dynamic user handling and proper fallback mechanisms
+// db/messagesummary.ts - Updated to use unified schema
 const neon_http_1 = require("drizzle-orm/neon-http");
 const serverless_1 = require("@neondatabase/serverless");
 const drizzle_orm_1 = require("drizzle-orm");
-const project_schema_1 = require("./project_schema");
-// Import component integrator specific schema
+// Import from unified schema (SINGLE SOURCE)
 const message_schema_1 = require("./message_schema");
 class DrizzleMessageHistoryDB {
     constructor(databaseUrl, anthropic) {
@@ -26,17 +25,74 @@ class DrizzleMessageHistoryDB {
     }
     // Additional methods to add to your DrizzleMessageHistoryDB class
     // Add these methods to your existing DrizzleMessageHistoryDB class in db/messagesummary.ts
+    // Add these methods to your DrizzleMessageHistoryDB class
     /**
-     * Get messages for a specific project
+     * Get a single project by ID
      */
+    getProject(projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const result = yield this.db
+                    .select()
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId))
+                    .limit(1);
+                return result[0] || null;
+            }
+            catch (error) {
+                console.error(`Error getting project by ID ${projectId}:`, error);
+                return null;
+            }
+        });
+    }
+    /**
+     * Update project title and conversation metadata
+     */
+    updateProjectTitle(projectId, updateData) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                yield this.db
+                    .update(message_schema_1.projects)
+                    .set({
+                    conversationTitle: updateData.conversationTitle,
+                    lastMessageAt: new Date(),
+                    updatedAt: updateData.updatedAt
+                })
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId));
+                console.log(`✅ Updated project ${projectId} title`);
+            }
+            catch (error) {
+                console.error(`Error updating project ${projectId} title:`, error);
+                throw error;
+            }
+        });
+    }
+    /**
+     * Update project with general data
+     */
+    updateProject(projectId, updateData) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                yield this.db
+                    .update(message_schema_1.projects)
+                    .set(updateData)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId));
+                console.log(`✅ Updated project ${projectId}`);
+            }
+            catch (error) {
+                console.error(`Error updating project ${projectId}:`, error);
+                throw error;
+            }
+        });
+    }
     getProjectMessages(projectId_1) {
         return __awaiter(this, arguments, void 0, function* (projectId, limit = 50) {
             try {
                 // Validate project exists
                 const project = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId))
                     .limit(1);
                 if (project.length === 0) {
                     return {
@@ -194,8 +250,8 @@ class DrizzleMessageHistoryDB {
                 // Validate project exists
                 const project = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId))
                     .limit(1);
                 if (project.length === 0) {
                     return {
@@ -215,13 +271,13 @@ class DrizzleMessageHistoryDB {
                 }
                 // Reset project message count
                 yield this.db
-                    .update(project_schema_1.projects)
+                    .update(message_schema_1.projects)
                     .set({
                     messageCount: 0,
                     lastMessageAt: null,
                     updatedAt: new Date()
                 })
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId));
                 return {
                     success: true,
                     data: {
@@ -248,8 +304,8 @@ class DrizzleMessageHistoryDB {
                 // Get project details
                 const project = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId))
                     .limit(1);
                 if (project.length === 0) {
                     return {
@@ -362,16 +418,6 @@ class DrizzleMessageHistoryDB {
             })
                 .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, sessionId));
             // ENHANCED: Update project message count if linked to project
-            if (projectId) {
-                yield this.db.update(project_schema_1.projects)
-                    .set({
-                    messageCount: (0, drizzle_orm_1.sql) `${project_schema_1.projects.messageCount} + 1`,
-                    lastMessageAt: new Date(),
-                    lastSessionId: sessionId,
-                    updatedAt: new Date()
-                })
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
-            }
             yield this.maintainRecentMessages(sessionId);
             return messageId;
         });
@@ -381,8 +427,8 @@ class DrizzleMessageHistoryDB {
             try {
                 const user = yield this.db
                     .select()
-                    .from(project_schema_1.users)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.users.id, userId))
+                    .from(message_schema_1.users)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.users.id, userId))
                     .limit(1);
                 return user.length > 0;
             }
@@ -392,16 +438,13 @@ class DrizzleMessageHistoryDB {
             }
         });
     }
-    // NEW: Create user if they don't exist (for external auth systems like Clerk)
     ensureUserExists(userId, userData) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // Check if user exists
                 const userExists = yield this.validateUserExists(userId);
                 if (userExists) {
                     return userId;
                 }
-                // User doesn't exist, create them
                 console.log(`📝 Creating user ${userId} as they don't exist...`);
                 const newUserData = {
                     id: userId,
@@ -413,7 +456,7 @@ class DrizzleMessageHistoryDB {
                     createdAt: new Date(),
                     updatedAt: new Date()
                 };
-                yield this.db.insert(project_schema_1.users).values(newUserData);
+                yield this.db.insert(message_schema_1.users).values(newUserData);
                 console.log(`✅ Created user ${userId}`);
                 return userId;
             }
@@ -428,18 +471,18 @@ class DrizzleMessageHistoryDB {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 const recentProjects = yield this.db
-                    .select({ userId: project_schema_1.projects.userId })
-                    .from(project_schema_1.projects)
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .select({ userId: message_schema_1.projects.userId })
+                    .from(message_schema_1.projects)
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projects.updatedAt))
                     .limit(1);
                 if (recentProjects.length > 0) {
                     return recentProjects[0].userId;
                 }
                 // If no projects exist, check for any user
                 const anyUser = yield this.db
-                    .select({ id: project_schema_1.users.id })
-                    .from(project_schema_1.users)
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.users.createdAt))
+                    .select({ id: message_schema_1.users.id })
+                    .from(message_schema_1.users)
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.users.createdAt))
                     .limit(1);
                 return anyUser.length > 0 ? anyUser[0].id : null;
             }
@@ -453,11 +496,20 @@ class DrizzleMessageHistoryDB {
     getRecentProjects() {
         return __awaiter(this, arguments, void 0, function* (limit = 10) {
             try {
-                return yield this.db
+                console.log(`🔍 [DEBUG] Getting ${limit} most recent projects across all users:`);
+                const recentProjects = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .from(message_schema_1.projects)
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projects.updatedAt))
                     .limit(limit);
+                console.log(`🔍 [DEBUG] Recent projects (all users):`);
+                recentProjects.forEach((project, index) => {
+                    console.log(`  ${index + 1}. Project ${project.id}: "${project.name}" (User: ${project.userId})`);
+                    console.log(`     updatedAt: ${project.updatedAt}`);
+                    console.log(`     zipUrl: ${project.zipUrl ? 'HAS_ZIP' : 'NO_ZIP'}`);
+                    console.log(`     ---`);
+                });
+                return recentProjects;
             }
             catch (error) {
                 console.error('Error getting recent projects:', error);
@@ -469,17 +521,28 @@ class DrizzleMessageHistoryDB {
     getUserProjects(userId) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // Validate user exists first
+                console.log(`🔍 [DEBUG] Getting projects for user: ${userId}`);
                 const userExists = yield this.validateUserExists(userId);
                 if (!userExists) {
                     console.warn(`⚠️ User ${userId} does not exist`);
                     return [];
                 }
-                return yield this.db
+                // Cast to any[] to avoid TypeScript issues temporarily
+                const projectList = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.userId, userId))
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt));
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.userId, userId))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projects.updatedAt));
+                console.log(`🔍 [DEBUG] Found ${projectList.length} projects for user ${userId}:`);
+                projectList.forEach((project, index) => {
+                    console.log(`  ${index + 1}. Project ${project.id}: "${project.name}"`);
+                    console.log(`     createdAt: ${project.createdAt}`);
+                    console.log(`     updatedAt: ${project.updatedAt}`);
+                    console.log(`     lastMessageAt: ${project.lastMessageAt}`);
+                    console.log(`     zipUrl: ${project.zipUrl ? 'HAS_ZIP' : 'NO_ZIP'}`);
+                    console.log(`     ---`);
+                });
+                return projectList;
             }
             catch (error) {
                 console.error('Error getting user projects:', error);
@@ -493,9 +556,9 @@ class DrizzleMessageHistoryDB {
             try {
                 return yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(project_schema_1.projects.status, 'ready'), (0, drizzle_orm_1.sql) `${project_schema_1.projects.deploymentUrl} IS NOT NULL`))
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt));
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(message_schema_1.projects.status, 'ready'), (0, drizzle_orm_1.sql) `${message_schema_1.projects.deploymentUrl} IS NOT NULL`))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projects.updatedAt));
             }
             catch (error) {
                 console.error('Error getting projects with URLs:', error);
@@ -508,9 +571,9 @@ class DrizzleMessageHistoryDB {
             try {
                 const result = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.lastSessionId, sessionId))
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.lastSessionId, sessionId))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projects.updatedAt))
                     .limit(1);
                 return result[0] || null;
             }
@@ -526,9 +589,9 @@ class DrizzleMessageHistoryDB {
             try {
                 const result = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.buildId, buildId))
-                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.buildId, buildId))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projects.updatedAt))
                     .limit(1);
                 return result[0] || null;
             }
@@ -543,9 +606,9 @@ class DrizzleMessageHistoryDB {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 yield this.db
-                    .update(project_schema_1.projects)
+                    .update(message_schema_1.projects)
                     .set(updateData)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId));
                 console.log(`✅ Updated project ${projectId} with new URLs`);
             }
             catch (error) {
@@ -561,9 +624,9 @@ class DrizzleMessageHistoryDB {
                 // Ensure the user exists before creating project
                 yield this.ensureUserExists(projectData.userId);
                 const result = yield this.db
-                    .insert(project_schema_1.projects)
+                    .insert(message_schema_1.projects)
                     .values(Object.assign(Object.assign({}, projectData), { createdAt: new Date(), updatedAt: new Date() }))
-                    .returning({ id: project_schema_1.projects.id });
+                    .returning({ id: message_schema_1.projects.id });
                 const projectId = result[0].id;
                 console.log(`✅ Created new project ${projectId} for user ${projectData.userId}`);
                 return projectId;
@@ -580,8 +643,8 @@ class DrizzleMessageHistoryDB {
             try {
                 const project = yield this.db
                     .select()
-                    .from(project_schema_1.projects)
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .from(message_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId))
                     .limit(1);
                 if (!project[0]) {
                     return null;
@@ -599,12 +662,12 @@ class DrizzleMessageHistoryDB {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 yield this.db
-                    .update(project_schema_1.projects)
+                    .update(message_schema_1.projects)
                     .set({
                     status,
                     updatedAt: new Date()
                 })
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId));
             }
             catch (error) {
                 console.error('Error updating project status:', error);
@@ -617,13 +680,13 @@ class DrizzleMessageHistoryDB {
         return __awaiter(this, void 0, void 0, function* () {
             try {
                 yield this.db
-                    .update(project_schema_1.projects)
+                    .update(message_schema_1.projects)
                     .set({
                     lastSessionId: sessionId,
                     lastMessageAt: new Date(),
                     updatedAt: new Date()
                 })
-                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, projectId));
             }
             catch (error) {
                 console.error('Error linking session to project:', error);
@@ -638,13 +701,13 @@ class DrizzleMessageHistoryDB {
                 const project = yield this.getProjectBySessionId(sessionId);
                 if (project) {
                     yield this.db
-                        .update(project_schema_1.projects)
+                        .update(message_schema_1.projects)
                         .set({
                         messageCount: project.messageCount + 1,
                         lastMessageAt: new Date(),
                         updatedAt: new Date()
                     })
-                        .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, project.id));
+                        .where((0, drizzle_orm_1.eq)(message_schema_1.projects.id, project.id));
                 }
             }
             catch (error) {
@@ -1302,9 +1365,6 @@ ${newMessagesText}
             }
         });
     }
-    /**
-     * Get project sessions (new method)
-     */
     getProjectSessions(projectId) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
