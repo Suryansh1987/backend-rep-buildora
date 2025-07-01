@@ -565,7 +565,7 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
                     projectId: urlResult.projectId,
                     userId: userId
                 };
-                const assistantMessageId = yield messageDB.addMessage(`Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => f.path).join('\n')}`, 'assistant', assistantMetadata);
+                const assistantMessageId = yield messageDB.addMessage(`Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => f.path).join('\n')}`, 'assistant');
                 console.log(`[${buildId}] 💾 Saved assistant response (ID: ${assistantMessageId})`);
             }
             catch (dbError) {

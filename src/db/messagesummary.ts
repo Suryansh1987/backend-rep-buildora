@@ -73,7 +73,439 @@ export class DrizzleMessageHistoryDB {
     this.anthropic = anthropic;
   }
 
-  // NEW: Validate if user exists in database
+  // Additional methods to add to your DrizzleMessageHistoryDB class
+// Add these methods to your existing DrizzleMessageHistoryDB class in db/messagesummary.ts
+
+/**
+ * Get messages for a specific project
+ */
+async getProjectMessages(projectId: number, limit: number = 50): Promise<{
+  success: boolean;
+  data?: any[];
+  error?: string;
+}> {
+  try {
+    // Validate project exists
+    const project = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+
+    if (project.length === 0) {
+      return {
+        success: false,
+        error: `Project ${projectId} not found`
+      };
+    }
+
+    // Get messages from CI messages table linked to this project
+    const projectMessages = await this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.projectId, projectId))
+      .orderBy(desc(messages.createdAt))
+      .limit(limit);
+
+    // Also get messages from session linked to project
+    const projectSessionMessages = await this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.sessionId, project[0].lastSessionId || `project-${projectId}`))
+      .orderBy(desc(messages.createdAt))
+      .limit(limit);
+
+    // Combine and deduplicate messages
+    const allMessages = [...projectMessages, ...projectSessionMessages];
+    const uniqueMessages = allMessages.filter((msg, index, self) => 
+      index === self.findIndex(m => m.id === msg.id)
+    );
+
+    // Sort by creation date
+    uniqueMessages.sort((a, b) => 
+      new Date(b.createdAt!).getTime() - new Date(a.createdAt!).getTime()
+    );
+
+    // Format messages for frontend
+    const formattedMessages = uniqueMessages.slice(0, limit).map(msg => ({
+      id: msg.id,
+      content: msg.content,
+      role: msg.messageType,
+      createdAt: msg.createdAt,
+      timestamp: msg.createdAt,
+      projectId: msg.projectId,
+      sessionId: msg.sessionId,
+      fileModifications: msg.fileModifications,
+      modificationApproach: msg.modificationApproach,
+      modificationSuccess: msg.modificationSuccess
+    }));
+
+    return {
+      success: true,
+      data: formattedMessages
+    };
+
+  } catch (error) {
+    console.error(`Error getting messages for project ${projectId}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * Get messages for a specific user
+ */
+async getUserMessages(userId: number, limit: number = 50): Promise<{
+  success: boolean;
+  data?: any[];
+  error?: string;
+}> {
+  try {
+    // Validate user exists
+    const userExists = await this.validateUserExists(userId);
+    if (!userExists) {
+      return {
+        success: false,
+        error: `User ${userId} not found`
+      };
+    }
+
+    // Get user's projects first
+    const userProjects = await this.getUserProjects(userId);
+    const projectIds = userProjects.map(p => p.id);
+
+    if (projectIds.length === 0) {
+      return {
+        success: true,
+        data: []
+      };
+    }
+
+    // Get messages from all user's projects
+    const userMessages = await this.db
+      .select()
+      .from(messages)
+      .where(sql`${messages.projectId} IN (${projectIds.join(',')})`)
+      .orderBy(desc(messages.createdAt))
+      .limit(limit);
+
+    // Format messages
+    const formattedMessages = userMessages.map(msg => ({
+      id: msg.id,
+      content: msg.content,
+      role: msg.messageType,
+      createdAt: msg.createdAt,
+      timestamp: msg.createdAt,
+      projectId: msg.projectId,
+      sessionId: msg.sessionId,
+      fileModifications: msg.fileModifications,
+      modificationApproach: msg.modificationApproach,
+      modificationSuccess: msg.modificationSuccess
+    }));
+
+    return {
+      success: true,
+      data: formattedMessages
+    };
+
+  } catch (error) {
+    console.error(`Error getting messages for user ${userId}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * Get messages for a specific session
+ */
+async getSessionMessages(sessionId: string): Promise<{
+  success: boolean;
+  data?: any[];
+  error?: string;
+}> {
+  try {
+    const sessionMessages = await this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.sessionId, sessionId))
+      .orderBy(desc(messages.createdAt));
+
+    // Format messages
+    const formattedMessages = sessionMessages.map(msg => ({
+      id: msg.id,
+      content: msg.content,
+      role: msg.messageType,
+      createdAt: msg.createdAt,
+      timestamp: msg.createdAt,
+      projectId: msg.projectId,
+      sessionId: msg.sessionId,
+      fileModifications: msg.fileModifications,
+      modificationApproach: msg.modificationApproach,
+      modificationSuccess: msg.modificationSuccess
+    }));
+
+    return {
+      success: true,
+      data: formattedMessages
+    };
+
+  } catch (error) {
+    console.error(`Error getting messages for session ${sessionId}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * Delete messages for a specific project
+ */
+async deleteProjectMessages(projectId: number): Promise<{
+  success: boolean;
+  data?: any;
+  error?: string;
+}> {
+  try {
+    // Validate project exists
+    const project = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+
+    if (project.length === 0) {
+      return {
+        success: false,
+        error: `Project ${projectId} not found`
+      };
+    }
+
+    // Delete messages linked to this project
+    const deletedCount = await this.db
+      .delete(messages)
+      .where(eq(messages.projectId, projectId));
+
+    // Also delete messages from project session
+    if (project[0].lastSessionId) {
+      await this.db
+        .delete(messages)
+        .where(eq(messages.sessionId, project[0].lastSessionId));
+    }
+
+    // Reset project message count
+    await this.db
+      .update(projects)
+      .set({
+        messageCount: 0,
+        lastMessageAt: null,
+        updatedAt: new Date()
+      })
+      .where(eq(projects.id, projectId));
+
+    return {
+      success: true,
+      data: {
+        deletedCount,
+        projectId
+      }
+    };
+
+  } catch (error) {
+    console.error(`Error deleting messages for project ${projectId}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * Get conversation context for a specific project
+ */
+async getProjectConversationContext(projectId: number): Promise<{
+  success: boolean;
+  data?: any;
+  error?: string;
+}> {
+  try {
+    // Get project details
+    const project = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+
+    if (project.length === 0) {
+      return {
+        success: false,
+        error: `Project ${projectId} not found`
+      };
+    }
+
+    // Get project messages
+    const messagesResult = await this.getProjectMessages(projectId, 20);
+    if (!messagesResult.success) {
+      return messagesResult;
+    }
+
+    // Get project summary if exists
+    const projectSummary = await this.db
+      .select()
+      .from(projectSummaries)
+      .where(eq(projectSummaries.projectId, projectId))
+      .orderBy(desc(projectSummaries.createdAt))
+      .limit(1);
+
+    // Build context
+    let context = `**PROJECT CONTEXT:**\n`;
+    context += `Project: ${project[0].name}\n`;
+    context += `Description: ${project[0].description || 'No description'}\n`;
+    context += `Framework: ${project[0].framework}\n`;
+    context += `Status: ${project[0].status}\n\n`;
+
+    if (projectSummary.length > 0) {
+      context += `**PROJECT SUMMARY:**\n${projectSummary[0].summary}\n\n`;
+    }
+
+    if (messagesResult.data && messagesResult.data.length > 0) {
+      context += `**RECENT MESSAGES:**\n`;
+      messagesResult.data.reverse().forEach((msg, index) => {
+        context += `${index + 1}. [${msg.role.toUpperCase()}]: ${msg.content}\n`;
+        if (msg.fileModifications && msg.fileModifications.length > 0) {
+          context += `   Modified: ${msg.fileModifications.join(', ')}\n`;
+        }
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        context,
+        project: project[0],
+        messages: messagesResult.data,
+        summary: projectSummary[0] || null
+      }
+    };
+
+  } catch (error) {
+    console.error(`Error getting context for project ${projectId}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
+/**
+ * Enhanced addMessage method to support project linking
+ */
+async addMessage(
+  content: string,
+  messageType: 'user' | 'assistant' | 'system',
+  metadata?: {
+    fileModifications?: string[];
+    modificationApproach?: 
+      'FULL_FILE' 
+      | 'TARGETED_NODES' 
+      | 'COMPONENT_ADDITION' 
+      | 'FULL_FILE_GENERATION' 
+      | null;
+    modificationSuccess?: boolean;
+    createdFiles?: string[];
+    addedFiles?: string[];
+    duration?: number;
+    projectSummaryId?: string;
+    promptType?: string;
+    requestType?: string;
+    relatedUserMessageId?: string;
+    success?: boolean;
+    processingTimeMs?: number;
+    tokenUsage?: any;
+    responseLength?: number;
+    buildId?: string;
+    previewUrl?: string;
+    downloadUrl?: string;
+    zipUrl?: string;
+    sessionId?: string;
+    userId?: number;
+    projectId?: number; // ENHANCED: Add projectId support
+  }
+): Promise<string> {
+  const sessionId = metadata?.sessionId || this.defaultSessionId;
+  const projectId = metadata?.projectId || null;
+  
+  // If userId is provided in metadata, ensure they exist
+  if (metadata?.userId) {
+    try {
+      await this.ensureUserExists(metadata.userId);
+    } catch (error) {
+      console.warn(`⚠️ Failed to ensure user ${metadata.userId} exists:`, error);
+    }
+  }
+  
+  const newMessage: NewMessage = {
+    sessionId,
+    projectId, // ENHANCED: Link to project
+    content,
+    messageType,
+    fileModifications: metadata?.fileModifications || null,
+    //@ts-ignore
+    modificationApproach: metadata?.modificationApproach || null,
+    modificationSuccess: metadata?.modificationSuccess || null,
+    reasoning: JSON.stringify({
+      promptType: metadata?.promptType,
+      requestType: metadata?.requestType,
+      relatedUserMessageId: metadata?.relatedUserMessageId,
+      success: metadata?.success,
+      processingTimeMs: metadata?.processingTimeMs,
+      tokenUsage: metadata?.tokenUsage,
+      responseLength: metadata?.responseLength,
+      buildId: metadata?.buildId,
+      previewUrl: metadata?.previewUrl,
+      downloadUrl: metadata?.downloadUrl,
+      zipUrl: metadata?.zipUrl,
+      userId: metadata?.userId,
+      projectId: metadata?.projectId, // Include projectId
+      error: metadata?.success === false ? 'Generation failed' : undefined
+    }),
+    projectSummaryId: metadata?.projectSummaryId || null,
+    createdAt: new Date()
+  };
+
+  const result = await this.db.insert(messages).values(newMessage).returning({ id: messages.id });
+  const messageId = result[0].id;
+
+  // Update conversation stats
+  await this.db.update(conversationStats)
+    .set({
+      totalMessageCount: sql`${conversationStats.totalMessageCount} + 1`,
+      lastMessageAt: new Date(),
+      lastActivity: new Date(),
+      updatedAt: new Date()
+    })
+    .where(eq(conversationStats.sessionId, sessionId));
+
+  // ENHANCED: Update project message count if linked to project
+  if (projectId) {
+    await this.db.update(projects)
+      .set({
+        messageCount: sql`${projects.messageCount} + 1`,
+        lastMessageAt: new Date(),
+        lastSessionId: sessionId,
+        updatedAt: new Date()
+      })
+      .where(eq(projects.id, projectId));
+  }
+
+  await this.maintainRecentMessages(sessionId);
+
+  return messageId;
+}
   async validateUserExists(userId: number): Promise<boolean> {
     try {
       const user = await this.db
@@ -616,92 +1048,7 @@ export class DrizzleMessageHistoryDB {
   }
 
   // UPDATED: Add a new message with user context
-  async addMessage(
-    content: string,
-    messageType: 'user' | 'assistant'|'system',
-    metadata?: {
-      fileModifications?: string[];
-      modificationApproach?: 
-        'FULL_FILE' 
-        | 'TARGETED_NODES' 
-        | 'COMPONENT_ADDITION' 
-        | 'FULL_FILE_GENERATION' 
-        | null;
-      modificationSuccess?: boolean;
-      createdFiles?: string[];
-      addedFiles?: string[];
-      duration?: number;
-      projectSummaryId?: string;
-      promptType?: string;
-      requestType?: string;
-      relatedUserMessageId?: string;
-      success?: boolean;
-      processingTimeMs?: number;
-      tokenUsage?: any;
-      responseLength?: number;
-      buildId?: string;
-      previewUrl?: string;
-      downloadUrl?: string;
-      zipUrl?: string;
-      sessionId?: string;
-      userId?: number;  // NEW: Add userId to metadata
-    }
-  ): Promise<string> {
-    const sessionId = metadata?.sessionId || this.defaultSessionId;
-    
-    // If userId is provided in metadata, ensure they exist
-    if (metadata?.userId) {
-      try {
-        await this.ensureUserExists(metadata.userId);
-      } catch (error) {
-        console.warn(`⚠️ Failed to ensure user ${metadata.userId} exists:`, error);
-      }
-    }
-    
-    const newMessage: NewMessage = {
-      sessionId,
-      projectId: null,
-      content,
-      messageType,
-      fileModifications: metadata?.fileModifications || null,
-      //@ts-ignore
-      modificationApproach: metadata?.modificationApproach || null,
-      modificationSuccess: metadata?.modificationSuccess || null,
-      reasoning: JSON.stringify({
-        promptType: metadata?.promptType,
-        requestType: metadata?.requestType,
-        relatedUserMessageId: metadata?.relatedUserMessageId,
-        success: metadata?.success,
-        processingTimeMs: metadata?.processingTimeMs,
-        tokenUsage: metadata?.tokenUsage,
-        responseLength: metadata?.responseLength,
-        buildId: metadata?.buildId,
-        previewUrl: metadata?.previewUrl,
-        downloadUrl: metadata?.downloadUrl,
-        zipUrl: metadata?.zipUrl,
-        userId: metadata?.userId,  // Include userId in reasoning
-        error: metadata?.success === false ? 'Generation failed' : undefined
-      }),
-      projectSummaryId: metadata?.projectSummaryId || null,
-      createdAt: new Date()
-    };
 
-    const result = await this.db.insert(messages).values(newMessage).returning({ id: messages.id });
-    const messageId = result[0].id;
-
-    await this.db.update(conversationStats)
-      .set({
-        totalMessageCount: sql`${conversationStats.totalMessageCount} + 1`,
-        lastMessageAt: new Date(),
-        lastActivity: new Date(),
-        updatedAt: new Date()
-      })
-      .where(eq(conversationStats.sessionId, sessionId));
-
-    await this.maintainRecentMessages(sessionId);
-
-    return messageId;
-  }
 
   /**
    * Save modification details for future context

@@ -57,7 +57,7 @@ const cors_1 = __importDefault(require("cors"));
 const fs = __importStar(require("fs"));
 const users_1 = __importDefault(require("./routes/users"));
 const projects_1 = __importDefault(require("./routes/projects"));
-const messages_1 = __importDefault(require("./routes/messages"));
+const messages_1 = __importStar(require("./routes/messages"));
 const session_1 = require("./routes/session");
 const generation_1 = require("./routes/generation");
 const modification_1 = require("./routes/modification");
@@ -69,6 +69,8 @@ const redis = new Redis_1.RedisService();
 const DATABASE_URL = process.env.DATABASE_URL;
 const messageDB = new messagesummary_1.DrizzleMessageHistoryDB(DATABASE_URL, anthropic);
 const sessionManager = new session_1.StatelessSessionManager(redis);
+// IMPORTANT: Initialize the message routes with the messageDB
+(0, messages_1.setMessageDB)(messageDB);
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
 app.use((req, res, next) => {
@@ -144,8 +146,8 @@ app.get("/health", (req, res) => {
 // Main API routes
 app.use("/api/users", users_1.default);
 app.use("/api/projects", projects_1.default);
-app.use("/api/messages", messages_1.default);
-// New session-aware routes
+app.use("/api/messages", messages_1.default); // This now works with the existing structure
+// Keep all your other existing routes:
 app.use("/api/session", (0, session_1.initializeSessionRoutes)(redis));
 app.use("/api/generate", (0, generation_1.initializeGenerationRoutes)(anthropic, messageDB, sessionManager));
 app.use("/api/modify", (0, modification_1.initializeModificationRoutes)(anthropic, messageDB, redis, sessionManager));

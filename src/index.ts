@@ -12,7 +12,7 @@ import * as fs from "fs";
 
 import userRoutes from "./routes/users";
 import projectRoutes from "./routes/projects"; 
-import messageRoutes from "./routes/messages";
+import messageRoutes, { setMessageDB } from "./routes/messages";
 
 import { initializeSessionRoutes, StatelessSessionManager } from "./routes/session";
 import { initializeGenerationRoutes } from "./routes/generation";
@@ -27,6 +27,9 @@ const redis = new RedisService();
 const DATABASE_URL = process.env.DATABASE_URL!;
 const messageDB = new DrizzleMessageHistoryDB(DATABASE_URL, anthropic);
 const sessionManager = new StatelessSessionManager(redis);
+
+// IMPORTANT: Initialize the message routes with the messageDB
+setMessageDB(messageDB);
 
 app.use(cors());
 app.use(express.json());
@@ -106,9 +109,9 @@ app.get("/health", (req: Request, res: Response) => {
 // Main API routes
 app.use("/api/users", userRoutes);
 app.use("/api/projects", projectRoutes);
-app.use("/api/messages", messageRoutes);
+app.use("/api/messages", messageRoutes); // This now works with the existing structure
 
-// New session-aware routes
+// Keep all your other existing routes:
 app.use("/api/session", initializeSessionRoutes(redis));
 app.use("/api/generate", initializeGenerationRoutes(anthropic, messageDB, sessionManager));
 app.use("/api/modify", initializeModificationRoutes(anthropic, messageDB, redis, sessionManager));

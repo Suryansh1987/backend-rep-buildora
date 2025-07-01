@@ -38,6 +38,72 @@ export declare class DrizzleMessageHistoryDB {
     private anthropic;
     private defaultSessionId;
     constructor(databaseUrl: string, anthropic: Anthropic);
+    /**
+     * Get messages for a specific project
+     */
+    getProjectMessages(projectId: number, limit?: number): Promise<{
+        success: boolean;
+        data?: any[];
+        error?: string;
+    }>;
+    /**
+     * Get messages for a specific user
+     */
+    getUserMessages(userId: number, limit?: number): Promise<{
+        success: boolean;
+        data?: any[];
+        error?: string;
+    }>;
+    /**
+     * Get messages for a specific session
+     */
+    getSessionMessages(sessionId: string): Promise<{
+        success: boolean;
+        data?: any[];
+        error?: string;
+    }>;
+    /**
+     * Delete messages for a specific project
+     */
+    deleteProjectMessages(projectId: number): Promise<{
+        success: boolean;
+        data?: any;
+        error?: string;
+    }>;
+    /**
+     * Get conversation context for a specific project
+     */
+    getProjectConversationContext(projectId: number): Promise<{
+        success: boolean;
+        data?: any;
+        error?: string;
+    }>;
+    /**
+     * Enhanced addMessage method to support project linking
+     */
+    addMessage(content: string, messageType: 'user' | 'assistant' | 'system', metadata?: {
+        fileModifications?: string[];
+        modificationApproach?: 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION' | 'FULL_FILE_GENERATION' | null;
+        modificationSuccess?: boolean;
+        createdFiles?: string[];
+        addedFiles?: string[];
+        duration?: number;
+        projectSummaryId?: string;
+        promptType?: string;
+        requestType?: string;
+        relatedUserMessageId?: string;
+        success?: boolean;
+        processingTimeMs?: number;
+        tokenUsage?: any;
+        responseLength?: number;
+        buildId?: string;
+        previewUrl?: string;
+        downloadUrl?: string;
+        zipUrl?: string;
+        sessionId?: string;
+        userId?: number;
+        projectId?: number;
+    }): Promise<string>;
     validateUserExists(userId: number): Promise<boolean>;
     ensureUserExists(userId: number, userData?: {
         clerkId?: string;
@@ -111,28 +177,6 @@ export declare class DrizzleMessageHistoryDB {
      */
     deleteProjectSummary(id: string): Promise<boolean>;
     initializeStats(): Promise<void>;
-    addMessage(content: string, messageType: 'user' | 'assistant' | 'system', metadata?: {
-        fileModifications?: string[];
-        modificationApproach?: 'FULL_FILE' | 'TARGETED_NODES' | 'COMPONENT_ADDITION' | 'FULL_FILE_GENERATION' | null;
-        modificationSuccess?: boolean;
-        createdFiles?: string[];
-        addedFiles?: string[];
-        duration?: number;
-        projectSummaryId?: string;
-        promptType?: string;
-        requestType?: string;
-        relatedUserMessageId?: string;
-        success?: boolean;
-        processingTimeMs?: number;
-        tokenUsage?: any;
-        responseLength?: number;
-        buildId?: string;
-        previewUrl?: string;
-        downloadUrl?: string;
-        zipUrl?: string;
-        sessionId?: string;
-        userId?: number;
-    }): Promise<string>;
     /**
      * Save modification details for future context
      */

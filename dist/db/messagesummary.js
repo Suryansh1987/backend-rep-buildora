@@ -24,7 +24,358 @@ class DrizzleMessageHistoryDB {
         this.db = (0, neon_http_1.drizzle)(sqlConnection);
         this.anthropic = anthropic;
     }
-    // NEW: Validate if user exists in database
+    // Additional methods to add to your DrizzleMessageHistoryDB class
+    // Add these methods to your existing DrizzleMessageHistoryDB class in db/messagesummary.ts
+    /**
+     * Get messages for a specific project
+     */
+    getProjectMessages(projectId_1) {
+        return __awaiter(this, arguments, void 0, function* (projectId, limit = 50) {
+            try {
+                // Validate project exists
+                const project = yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .limit(1);
+                if (project.length === 0) {
+                    return {
+                        success: false,
+                        error: `Project ${projectId} not found`
+                    };
+                }
+                // Get messages from CI messages table linked to this project
+                const projectMessages = yield this.db
+                    .select()
+                    .from(message_schema_1.ciMessages)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.projectId, projectId))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt))
+                    .limit(limit);
+                // Also get messages from session linked to project
+                const projectSessionMessages = yield this.db
+                    .select()
+                    .from(message_schema_1.ciMessages)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, project[0].lastSessionId || `project-${projectId}`))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt))
+                    .limit(limit);
+                // Combine and deduplicate messages
+                const allMessages = [...projectMessages, ...projectSessionMessages];
+                const uniqueMessages = allMessages.filter((msg, index, self) => index === self.findIndex(m => m.id === msg.id));
+                // Sort by creation date
+                uniqueMessages.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                // Format messages for frontend
+                const formattedMessages = uniqueMessages.slice(0, limit).map(msg => ({
+                    id: msg.id,
+                    content: msg.content,
+                    role: msg.messageType,
+                    createdAt: msg.createdAt,
+                    timestamp: msg.createdAt,
+                    projectId: msg.projectId,
+                    sessionId: msg.sessionId,
+                    fileModifications: msg.fileModifications,
+                    modificationApproach: msg.modificationApproach,
+                    modificationSuccess: msg.modificationSuccess
+                }));
+                return {
+                    success: true,
+                    data: formattedMessages
+                };
+            }
+            catch (error) {
+                console.error(`Error getting messages for project ${projectId}:`, error);
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                };
+            }
+        });
+    }
+    /**
+     * Get messages for a specific user
+     */
+    getUserMessages(userId_1) {
+        return __awaiter(this, arguments, void 0, function* (userId, limit = 50) {
+            try {
+                // Validate user exists
+                const userExists = yield this.validateUserExists(userId);
+                if (!userExists) {
+                    return {
+                        success: false,
+                        error: `User ${userId} not found`
+                    };
+                }
+                // Get user's projects first
+                const userProjects = yield this.getUserProjects(userId);
+                const projectIds = userProjects.map(p => p.id);
+                if (projectIds.length === 0) {
+                    return {
+                        success: true,
+                        data: []
+                    };
+                }
+                // Get messages from all user's projects
+                const userMessages = yield this.db
+                    .select()
+                    .from(message_schema_1.ciMessages)
+                    .where((0, drizzle_orm_1.sql) `${message_schema_1.ciMessages.projectId} IN (${projectIds.join(',')})`)
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt))
+                    .limit(limit);
+                // Format messages
+                const formattedMessages = userMessages.map(msg => ({
+                    id: msg.id,
+                    content: msg.content,
+                    role: msg.messageType,
+                    createdAt: msg.createdAt,
+                    timestamp: msg.createdAt,
+                    projectId: msg.projectId,
+                    sessionId: msg.sessionId,
+                    fileModifications: msg.fileModifications,
+                    modificationApproach: msg.modificationApproach,
+                    modificationSuccess: msg.modificationSuccess
+                }));
+                return {
+                    success: true,
+                    data: formattedMessages
+                };
+            }
+            catch (error) {
+                console.error(`Error getting messages for user ${userId}:`, error);
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                };
+            }
+        });
+    }
+    /**
+     * Get messages for a specific session
+     */
+    getSessionMessages(sessionId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const sessionMessages = yield this.db
+                    .select()
+                    .from(message_schema_1.ciMessages)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, sessionId))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.ciMessages.createdAt));
+                // Format messages
+                const formattedMessages = sessionMessages.map(msg => ({
+                    id: msg.id,
+                    content: msg.content,
+                    role: msg.messageType,
+                    createdAt: msg.createdAt,
+                    timestamp: msg.createdAt,
+                    projectId: msg.projectId,
+                    sessionId: msg.sessionId,
+                    fileModifications: msg.fileModifications,
+                    modificationApproach: msg.modificationApproach,
+                    modificationSuccess: msg.modificationSuccess
+                }));
+                return {
+                    success: true,
+                    data: formattedMessages
+                };
+            }
+            catch (error) {
+                console.error(`Error getting messages for session ${sessionId}:`, error);
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                };
+            }
+        });
+    }
+    /**
+     * Delete messages for a specific project
+     */
+    deleteProjectMessages(projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Validate project exists
+                const project = yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .limit(1);
+                if (project.length === 0) {
+                    return {
+                        success: false,
+                        error: `Project ${projectId} not found`
+                    };
+                }
+                // Delete messages linked to this project
+                const deletedCount = yield this.db
+                    .delete(message_schema_1.ciMessages)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.projectId, projectId));
+                // Also delete messages from project session
+                if (project[0].lastSessionId) {
+                    yield this.db
+                        .delete(message_schema_1.ciMessages)
+                        .where((0, drizzle_orm_1.eq)(message_schema_1.ciMessages.sessionId, project[0].lastSessionId));
+                }
+                // Reset project message count
+                yield this.db
+                    .update(project_schema_1.projects)
+                    .set({
+                    messageCount: 0,
+                    lastMessageAt: null,
+                    updatedAt: new Date()
+                })
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+                return {
+                    success: true,
+                    data: {
+                        deletedCount,
+                        projectId
+                    }
+                };
+            }
+            catch (error) {
+                console.error(`Error deleting messages for project ${projectId}:`, error);
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                };
+            }
+        });
+    }
+    /**
+     * Get conversation context for a specific project
+     */
+    getProjectConversationContext(projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Get project details
+                const project = yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .limit(1);
+                if (project.length === 0) {
+                    return {
+                        success: false,
+                        error: `Project ${projectId} not found`
+                    };
+                }
+                // Get project messages
+                const messagesResult = yield this.getProjectMessages(projectId, 20);
+                if (!messagesResult.success) {
+                    return messagesResult;
+                }
+                // Get project summary if exists
+                const projectSummary = yield this.db
+                    .select()
+                    .from(message_schema_1.projectSummaries)
+                    .where((0, drizzle_orm_1.eq)(message_schema_1.projectSummaries.projectId, projectId))
+                    .orderBy((0, drizzle_orm_1.desc)(message_schema_1.projectSummaries.createdAt))
+                    .limit(1);
+                // Build context
+                let context = `**PROJECT CONTEXT:**\n`;
+                context += `Project: ${project[0].name}\n`;
+                context += `Description: ${project[0].description || 'No description'}\n`;
+                context += `Framework: ${project[0].framework}\n`;
+                context += `Status: ${project[0].status}\n\n`;
+                if (projectSummary.length > 0) {
+                    context += `**PROJECT SUMMARY:**\n${projectSummary[0].summary}\n\n`;
+                }
+                if (messagesResult.data && messagesResult.data.length > 0) {
+                    context += `**RECENT MESSAGES:**\n`;
+                    messagesResult.data.reverse().forEach((msg, index) => {
+                        context += `${index + 1}. [${msg.role.toUpperCase()}]: ${msg.content}\n`;
+                        if (msg.fileModifications && msg.fileModifications.length > 0) {
+                            context += `   Modified: ${msg.fileModifications.join(', ')}\n`;
+                        }
+                    });
+                }
+                return {
+                    success: true,
+                    data: {
+                        context,
+                        project: project[0],
+                        messages: messagesResult.data,
+                        summary: projectSummary[0] || null
+                    }
+                };
+            }
+            catch (error) {
+                console.error(`Error getting context for project ${projectId}:`, error);
+                return {
+                    success: false,
+                    error: error instanceof Error ? error.message : 'Unknown error'
+                };
+            }
+        });
+    }
+    /**
+     * Enhanced addMessage method to support project linking
+     */
+    addMessage(content, messageType, metadata) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const sessionId = (metadata === null || metadata === void 0 ? void 0 : metadata.sessionId) || this.defaultSessionId;
+            const projectId = (metadata === null || metadata === void 0 ? void 0 : metadata.projectId) || null;
+            // If userId is provided in metadata, ensure they exist
+            if (metadata === null || metadata === void 0 ? void 0 : metadata.userId) {
+                try {
+                    yield this.ensureUserExists(metadata.userId);
+                }
+                catch (error) {
+                    console.warn(`⚠️ Failed to ensure user ${metadata.userId} exists:`, error);
+                }
+            }
+            const newMessage = {
+                sessionId,
+                projectId, // ENHANCED: Link to project
+                content,
+                messageType,
+                fileModifications: (metadata === null || metadata === void 0 ? void 0 : metadata.fileModifications) || null,
+                //@ts-ignore
+                modificationApproach: (metadata === null || metadata === void 0 ? void 0 : metadata.modificationApproach) || null,
+                modificationSuccess: (metadata === null || metadata === void 0 ? void 0 : metadata.modificationSuccess) || null,
+                reasoning: JSON.stringify({
+                    promptType: metadata === null || metadata === void 0 ? void 0 : metadata.promptType,
+                    requestType: metadata === null || metadata === void 0 ? void 0 : metadata.requestType,
+                    relatedUserMessageId: metadata === null || metadata === void 0 ? void 0 : metadata.relatedUserMessageId,
+                    success: metadata === null || metadata === void 0 ? void 0 : metadata.success,
+                    processingTimeMs: metadata === null || metadata === void 0 ? void 0 : metadata.processingTimeMs,
+                    tokenUsage: metadata === null || metadata === void 0 ? void 0 : metadata.tokenUsage,
+                    responseLength: metadata === null || metadata === void 0 ? void 0 : metadata.responseLength,
+                    buildId: metadata === null || metadata === void 0 ? void 0 : metadata.buildId,
+                    previewUrl: metadata === null || metadata === void 0 ? void 0 : metadata.previewUrl,
+                    downloadUrl: metadata === null || metadata === void 0 ? void 0 : metadata.downloadUrl,
+                    zipUrl: metadata === null || metadata === void 0 ? void 0 : metadata.zipUrl,
+                    userId: metadata === null || metadata === void 0 ? void 0 : metadata.userId,
+                    projectId: metadata === null || metadata === void 0 ? void 0 : metadata.projectId, // Include projectId
+                    error: (metadata === null || metadata === void 0 ? void 0 : metadata.success) === false ? 'Generation failed' : undefined
+                }),
+                projectSummaryId: (metadata === null || metadata === void 0 ? void 0 : metadata.projectSummaryId) || null,
+                createdAt: new Date()
+            };
+            const result = yield this.db.insert(message_schema_1.ciMessages).values(newMessage).returning({ id: message_schema_1.ciMessages.id });
+            const messageId = result[0].id;
+            // Update conversation stats
+            yield this.db.update(message_schema_1.conversationStats)
+                .set({
+                totalMessageCount: (0, drizzle_orm_1.sql) `${message_schema_1.conversationStats.totalMessageCount} + 1`,
+                lastMessageAt: new Date(),
+                lastActivity: new Date(),
+                updatedAt: new Date()
+            })
+                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, sessionId));
+            // ENHANCED: Update project message count if linked to project
+            if (projectId) {
+                yield this.db.update(project_schema_1.projects)
+                    .set({
+                    messageCount: (0, drizzle_orm_1.sql) `${project_schema_1.projects.messageCount} + 1`,
+                    lastMessageAt: new Date(),
+                    lastSessionId: sessionId,
+                    updatedAt: new Date()
+                })
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+            }
+            yield this.maintainRecentMessages(sessionId);
+            return messageId;
+        });
+    }
     validateUserExists(userId) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
@@ -518,59 +869,6 @@ class DrizzleMessageHistoryDB {
         });
     }
     // UPDATED: Add a new message with user context
-    addMessage(content, messageType, metadata) {
-        return __awaiter(this, void 0, void 0, function* () {
-            const sessionId = (metadata === null || metadata === void 0 ? void 0 : metadata.sessionId) || this.defaultSessionId;
-            // If userId is provided in metadata, ensure they exist
-            if (metadata === null || metadata === void 0 ? void 0 : metadata.userId) {
-                try {
-                    yield this.ensureUserExists(metadata.userId);
-                }
-                catch (error) {
-                    console.warn(`⚠️ Failed to ensure user ${metadata.userId} exists:`, error);
-                }
-            }
-            const newMessage = {
-                sessionId,
-                projectId: null,
-                content,
-                messageType,
-                fileModifications: (metadata === null || metadata === void 0 ? void 0 : metadata.fileModifications) || null,
-                //@ts-ignore
-                modificationApproach: (metadata === null || metadata === void 0 ? void 0 : metadata.modificationApproach) || null,
-                modificationSuccess: (metadata === null || metadata === void 0 ? void 0 : metadata.modificationSuccess) || null,
-                reasoning: JSON.stringify({
-                    promptType: metadata === null || metadata === void 0 ? void 0 : metadata.promptType,
-                    requestType: metadata === null || metadata === void 0 ? void 0 : metadata.requestType,
-                    relatedUserMessageId: metadata === null || metadata === void 0 ? void 0 : metadata.relatedUserMessageId,
-                    success: metadata === null || metadata === void 0 ? void 0 : metadata.success,
-                    processingTimeMs: metadata === null || metadata === void 0 ? void 0 : metadata.processingTimeMs,
-                    tokenUsage: metadata === null || metadata === void 0 ? void 0 : metadata.tokenUsage,
-                    responseLength: metadata === null || metadata === void 0 ? void 0 : metadata.responseLength,
-                    buildId: metadata === null || metadata === void 0 ? void 0 : metadata.buildId,
-                    previewUrl: metadata === null || metadata === void 0 ? void 0 : metadata.previewUrl,
-                    downloadUrl: metadata === null || metadata === void 0 ? void 0 : metadata.downloadUrl,
-                    zipUrl: metadata === null || metadata === void 0 ? void 0 : metadata.zipUrl,
-                    userId: metadata === null || metadata === void 0 ? void 0 : metadata.userId, // Include userId in reasoning
-                    error: (metadata === null || metadata === void 0 ? void 0 : metadata.success) === false ? 'Generation failed' : undefined
-                }),
-                projectSummaryId: (metadata === null || metadata === void 0 ? void 0 : metadata.projectSummaryId) || null,
-                createdAt: new Date()
-            };
-            const result = yield this.db.insert(message_schema_1.ciMessages).values(newMessage).returning({ id: message_schema_1.ciMessages.id });
-            const messageId = result[0].id;
-            yield this.db.update(message_schema_1.conversationStats)
-                .set({
-                totalMessageCount: (0, drizzle_orm_1.sql) `${message_schema_1.conversationStats.totalMessageCount} + 1`,
-                lastMessageAt: new Date(),
-                lastActivity: new Date(),
-                updatedAt: new Date()
-            })
-                .where((0, drizzle_orm_1.eq)(message_schema_1.conversationStats.sessionId, sessionId));
-            yield this.maintainRecentMessages(sessionId);
-            return messageId;
-        });
-    }
     /**
      * Save modification details for future context
      */

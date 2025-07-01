@@ -610,9 +610,8 @@ Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
 
         const assistantMessageId = await messageDB.addMessage(
           `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => f.path).join('\n')}`,
-          'assistant',
-          assistantMetadata
-        );
+          'assistant'
+                );
         console.log(`[${buildId}] 💾 Saved assistant response (ID: ${assistantMessageId})`);
       } catch (dbError) {
         console.warn(`[${buildId}] ⚠️ Failed to save assistant response:`, dbError);
