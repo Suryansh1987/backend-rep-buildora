@@ -1,5 +1,5 @@
 // ============================================================================
-// FIXED TARGETED NODES PROCESSOR - PROPER COMPONENT HANDLING
+// GRANULAR AST PROCESSOR - FILE BY FILE NODE ANALYSIS
 // ============================================================================
 
 import { promises as fs } from 'fs';
@@ -9,13 +9,45 @@ import { RedisModificationSummary } from '../filemodifier/modification';
 import { ASTAnalyzer } from './Astanalyzer';
 import { TokenTracker } from '../../utils/TokenTracer';
 import { StructureValidator } from '../../utils/Structurevalidator';
-import { 
-  targetedNodesPrompt, 
-  replaceTemplateVariables, 
-  prepareTargetedNodesVariables
-} from '../filemodifier/template';
 
-export class FixedTargetedNodesProcessor {
+// ============================================================================
+// GRANULAR ANALYSIS TYPES
+// ============================================================================
+
+interface FileNodeAnalysisRequest {
+  filePath: string;
+  componentName: string;
+  componentPurpose: string;
+  astNodes: ASTNode[];
+  userRequest: string;
+}
+
+interface FileNodeAnalysisResponse {
+  needsChanges: boolean;
+  selectedNodeIds: string[];
+  reasoning: string;
+  confidence: number;
+}
+
+interface NodeModificationRequest {
+  nodeId: string;
+  currentCode: string;
+  context: string;
+  userRequest: string;
+  filePath: string;
+}
+
+interface NodeModificationResponse {
+  nodeId: string;
+  modifiedCode: string;
+  reasoning: string;
+}
+
+// ============================================================================
+// MAIN GRANULAR PROCESSOR
+// ============================================================================
+
+export class GranularASTProcessor {
   private anthropic: any;
   private tokenTracker: TokenTracker;
   private astAnalyzer: ASTAnalyzer;
@@ -28,7 +60,8 @@ export class FixedTargetedNodesProcessor {
     this.tokenTracker = tokenTracker;
     this.astAnalyzer = astAnalyzer;
     this.structureValidator = new StructureValidator();
-    this.reactBasePath = reactBasePath || process.cwd();
+    // CRITICAL FIX: Clean the double 'd' typo in path
+    this.reactBasePath = (reactBasePath || process.cwd()).replace(/builddora/g, 'buildora');
   }
 
   setStreamCallback(callback: (message: string) => void): void {
@@ -39,199 +72,25 @@ export class FixedTargetedNodesProcessor {
     if (this.streamCallback) {
       this.streamCallback(message);
     }
+    console.log(message);
   }
 
   private resolveFilePath(projectFile: ProjectFile): string {
     if (isAbsolute(projectFile.path)) {
-      return projectFile.path;
+      return projectFile.path.replace(/builddora/g, 'buildora');
     }
 
     if (projectFile.relativePath) {
       return join(this.reactBasePath, projectFile.relativePath);
     }
 
-    return projectFile.path;
+    return projectFile.path.replace(/builddora/g, 'buildora');
   }
 
   /**
-   * FIXED: Only skip actual styling files, NOT component directories
+   * MAIN GRANULAR PROCESSING METHOD
    */
-  private shouldSkipFile(filePath: string, content: string): boolean {
-    // ONLY skip these specific file types - NOT directories
-    const skipFileTypes = [
-      /\.css$/i,           // Pure CSS files
-      /\.scss$/i,          // SCSS files
-      /\.sass$/i,          // SASS files
-      /\.less$/i,          // LESS files
-      /\.styl$/i,          // Stylus files
-      /\.module\.css$/i,   // CSS modules
-      /\.module\.scss$/i,  // SCSS modules
-      /package\.json$/i,   // Package files
-      /yarn\.lock$/i,      // Lock files
-      /package-lock\.json$/i,
-      /\.gitignore$/i,     // Git files
-      /\.env$/i,           // Environment files
-      /\.md$/i,            // Markdown files
-      /\.txt$/i,           // Text files
-      /\.log$/i,           // Log files
-      /\.(png|jpg|jpeg|gif|svg|ico|webp)$/i, // Image files
-      /\.(mp4|mp3|wav|avi)$/i, // Media files
-      /dist\//i,           // Distribution directories
-      /build\//i,          // Build directories
-      /node_modules\//i,   // Node modules
-      /\.next\//i,         // Next.js build
-      /\.git\//i           // Git directory
-    ];
-
-    // Check if file matches skip patterns
-    const shouldSkipByPath = skipFileTypes.some(pattern => pattern.test(filePath));
-    
-    if (shouldSkipByPath) {
-      this.streamUpdate(`⏭️ Skipping non-code file: ${filePath}`);
-      return true;
-    }
-
-    // FIXED: Don't skip component directories - process ALL .tsx/.jsx/.ts/.js files
-    if (filePath.match(/\.(tsx?|jsx?)$/i)) {
-      this.streamUpdate(`✅ Processing React/JS file: ${filePath}`);
-      return false; // Never skip React/JS files
-    }
-
-    // Only skip if file has ZERO business logic (very conservative)
-    const hasBusinessLogic = this.hasBusinessLogic(content);
-    
-    if (!hasBusinessLogic) {
-      this.streamUpdate(`⏭️ Skipping file with no business logic: ${filePath}`);
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Check if file contains actual business logic (not just styling)
-   */
-  private hasBusinessLogic(content: string): boolean {
-    // Business logic indicators
-    const businessLogicPatterns = [
-      // React patterns
-      /import.*React/i,
-      /useState\(/i,
-      /useEffect\(/i,
-      /useCallback\(/i,
-      /useMemo\(/i,
-      /useContext\(/i,
-      /useReducer\(/i,
-      
-      // Function definitions
-      /function\s+\w+/i,
-      /const\s+\w+\s*=\s*\([^)]*\)\s*=>/i,
-      /export\s+(default\s+)?function/i,
-      /export\s+(default\s+)?(class|const)/i,
-      
-      // Control flow
-      /if\s*\(/i,
-      /for\s*\(/i,
-      /while\s*\(/i,
-      /switch\s*\(/i,
-      /try\s*{/i,
-      /catch\s*\(/i,
-      
-      // Data operations
-      /\.map\(/i,
-      /\.filter\(/i,
-      /\.reduce\(/i,
-      /\.find\(/i,
-      /\.some\(/i,
-      /\.every\(/i,
-      
-      // API calls
-      /fetch\(/i,
-      /axios\./i,
-      /api\./i,
-      /await\s+/i,
-      /\.then\(/i,
-      /\.catch\(/i,
-      
-      // JSX/TSX
-      /return\s*\(/i,
-      /<\w+/i,
-      /jsx/i,
-      /tsx/i,
-      
-      // TypeScript
-      /interface\s+\w+/i,
-      /type\s+\w+/i,
-      /:\s*\w+/i,
-      
-      // Props and state
-      /props\./i,
-      /this\.state/i,
-      /this\.props/i,
-      
-      // Event handlers
-      /onClick/i,
-      /onChange/i,
-      /onSubmit/i,
-      /handle\w+/i,
-      
-      // Imports/exports
-      /import.*from/i,
-      /export\s+/i,
-      /module\.exports/i,
-      /require\(/i,
-      
-      // Variables and constants
-      /const\s+\w+/i,
-      /let\s+\w+/i,
-      /var\s+\w+/i,
-    ];
-
-    // Count business logic patterns
-    const logicCount = businessLogicPatterns.reduce((count, pattern) => {
-      return count + (content.match(pattern) ? 1 : 0);
-    }, 0);
-
-    // File has business logic if it contains at least 2 patterns
-    return logicCount >= 2;
-  }
-
-  /**
-   * FIXED: Don't filter out UI nodes - process ALL nodes in component files
-   */
-  private shouldProcessNode(node: ASTNode, filePath: string): boolean {
-    // ALWAYS process nodes in component files
-    if (filePath.match(/src\/(components|pages)\//i)) {
-      return true;
-    }
-
-    // For other files, check if node has meaningful content
-    const meaningfulPatterns = [
-      /function\s+\w+/i,
-      /const\s+\w+\s*=/i,
-      /class\s+\w+/i,
-      /interface\s+\w+/i,
-      /type\s+\w+/i,
-      /export/i,
-      /import/i,
-      /if\s*\(/i,
-      /for\s*\(/i,
-      /while\s*\(/i,
-      /return/i,
-      /useState/i,
-      /useEffect/i,
-      /handle\w+/i,
-      /onClick/i,
-      /onChange/i,
-    ];
-
-    return meaningfulPatterns.some(pattern => pattern.test(node.codeSnippet));
-  }
-
-  /**
-   * Main entry point matching the expected interface
-   */
-  async processTargetedModification(
+  async processGranularModification(
     prompt: string,
     projectFiles: Map<string, ProjectFile>,
     reactBasePath: string,
@@ -247,7 +106,9 @@ export class FixedTargetedNodesProcessor {
       success: boolean;
       details?: {
         linesChanged?: number;
-        componentsAffected?: string[];
+        nodesAnalyzed?: number;
+        nodesSelected?: number;
+        nodesModified?: number;
         reasoning?: string;
       };
     }>;
@@ -255,114 +116,182 @@ export class FixedTargetedNodesProcessor {
     this.setStreamCallback(streamCallback);
     
     if (reactBasePath) {
-      this.reactBasePath = reactBasePath;
+      this.reactBasePath = reactBasePath.replace(/builddora/g, 'buildora');
     }
 
     try {
-      this.streamUpdate(`🎯 FIXED: Starting targeted modification (processing ALL component files)...`);
+      this.streamUpdate(`🎯 GRANULAR: Starting file-by-file AST node analysis...`);
+      this.streamUpdate(`📂 Base path: ${this.reactBasePath}`);
       
-      let successCount = 0;
+      let totalFilesProcessed = 0;
+      let totalFilesModified = 0;
+      let totalNodesAnalyzed = 0;
+      let totalNodesSelected = 0;
+      let totalNodesModified = 0;
       const changes: Array<any> = [];
-      const relevantFiles: Array<{ filePath: string; score: number; targetNodes: ASTNode[]; actualPath: string }> = [];
-      
-      // Step 1: Process ALL files, only skip actual non-code files
-      for (const [filePath] of projectFiles) {
-        const projectFile = projectFiles.get(filePath);
-        if (!projectFile) continue;
 
-        // FIXED: Only skip actual non-code files
-        if (this.shouldSkipFile(filePath, projectFile.content)) {
-          continue; // Skip message already logged in shouldSkipFile
-        }
+      // Filter to relevant files only
+      const relevantFiles = this.filterRelevantFiles(projectFiles);
+      this.streamUpdate(`📁 Found ${relevantFiles.size} relevant files to analyze`);
 
-        // Parse AST nodes
-        const astNodes = this.astAnalyzer.parseFileWithAST(filePath, projectFiles);
-        
-        // FIXED: Process ALL nodes in component files
-        const processableNodes = astNodes.filter(node => this.shouldProcessNode(node, filePath));
-        
-        if (processableNodes.length === 0) {
-          this.streamUpdate(`⏭️ Skipping ${filePath} - no processable nodes found`);
-          continue;
-        }
-        
-        // Get file relevance
-        const relevanceResult = await this.astAnalyzer.analyzeFileRelevance(
-          prompt,
-          filePath,
-          processableNodes,
-          'TARGETED_NODES',
-          projectFiles,
-          this.anthropic,
-          this.tokenTracker
-        );
-        
-        const actualPath = this.resolveFilePath(projectFile);
-        
-        relevantFiles.push({
-          filePath,
-          score: relevanceResult.relevanceScore || 0,
-          targetNodes: processableNodes,
-          actualPath
-        });
-        
-        this.streamUpdate(`✅ Added ${processableNodes.length} nodes from ${filePath} (score: ${relevanceResult.relevanceScore || 0})`);
-      }
-      
-      // Step 2: Sort by relevance but process ALL files
-      relevantFiles.sort((a, b) => b.score - a.score);
-      
-      this.streamUpdate(`🎯 Processing ${relevantFiles.length} files with nodes...`);
-      
-      // Step 3: Apply modifications
-      for (const { filePath, targetNodes, score, actualPath } of relevantFiles) {
-        this.streamUpdate(`🔧 Processing ${filePath} (score: ${score}, ${targetNodes.length} nodes)...`);
-        
-        const modifications = await this.modifyCodeSnippetsWithTemplate(prompt, targetNodes, filePath, projectFiles);
-        
-        const success = await this.applyModifications(filePath, targetNodes, modifications, projectFiles, actualPath);
-        
-        const change = {
-          type: 'modified',
-          file: filePath,
-          description: `Processed ${modifications.size} code modifications`,
-          success: success,
-          details: {
-            linesChanged: modifications.size,
-            componentsAffected: targetNodes.map(n => n.id),
-            reasoning: `Processed ${targetNodes.length} nodes in ${filePath}`
+      // STEP 1: Process each file individually
+      for (const [filePath, projectFile] of relevantFiles) {
+        try {
+          this.streamUpdate(`\n🔍 ANALYZING FILE: ${filePath}`);
+          
+          // Parse AST nodes for this specific file
+          const astNodes = this.astAnalyzer.parseFileWithAST(filePath, projectFiles);
+          
+          if (astNodes.length === 0) {
+            this.streamUpdate(`⏭️ No AST nodes found in ${filePath}, skipping...`);
+            continue;
           }
-        };
-        changes.push(change);
-        
-        if (success) {
-          successCount++;
-          this.streamUpdate(`✅ Successfully modified ${filePath} (${modifications.size} nodes updated)`);
-        } else {
-          this.streamUpdate(`❌ Failed to modify ${filePath}`);
+
+          this.streamUpdate(`📊 Found ${astNodes.length} AST nodes in ${filePath}`);
+          totalNodesAnalyzed += astNodes.length;
+
+          // Get component info
+          const componentInfo = this.analyzeFileForTemplate(projectFile);
+
+          // STEP 2: Ask Claude if this file needs changes and which nodes
+          const nodeAnalysis = await this.analyzeFileNodes(
+            filePath,
+            componentInfo.componentName,
+            componentInfo.componentPurpose,
+            astNodes,
+            prompt
+          );
+
+          totalFilesProcessed++;
+
+          if (!nodeAnalysis.needsChanges || nodeAnalysis.selectedNodeIds.length === 0) {
+            this.streamUpdate(`⏭️ ${filePath}: No changes needed (${nodeAnalysis.reasoning})`);
+            
+            changes.push({
+              type: 'analyzed',
+              file: filePath,
+              description: `No changes needed: ${nodeAnalysis.reasoning}`,
+              success: true,
+              details: {
+                nodesAnalyzed: astNodes.length,
+                nodesSelected: 0,
+                nodesModified: 0,
+                reasoning: nodeAnalysis.reasoning
+              }
+            });
+            continue;
+          }
+
+          this.streamUpdate(`✅ ${filePath}: Needs changes - selected ${nodeAnalysis.selectedNodeIds.length} nodes`);
+          this.streamUpdate(`   📝 Reasoning: ${nodeAnalysis.reasoning}`);
+          totalNodesSelected += nodeAnalysis.selectedNodeIds.length;
+
+          // STEP 3: Get the selected nodes and modify them
+          const selectedNodes = astNodes.filter(node => nodeAnalysis.selectedNodeIds.includes(node.id));
+          
+          if (selectedNodes.length === 0) {
+            this.streamUpdate(`⚠️ ${filePath}: Node IDs not found, skipping...`);
+            continue;
+          }
+
+          // STEP 4: Generate modifications for selected nodes
+          const nodeModifications = await this.modifySelectedNodes(
+            selectedNodes,
+            prompt,
+            filePath,
+            componentInfo
+          );
+
+          if (nodeModifications.length === 0) {
+            this.streamUpdate(`❌ ${filePath}: No modifications generated for selected nodes`);
+            continue;
+          }
+
+          // STEP 5: Apply modifications to the file
+          const actualPath = this.resolveFilePath(projectFile);
+          const applySuccess = await this.applyNodeModifications(
+            filePath,
+            astNodes,
+            nodeModifications,
+            projectFile,
+            actualPath
+          );
+
+          totalNodesModified += nodeModifications.length;
+
+          if (applySuccess) {
+            totalFilesModified++;
+            this.streamUpdate(`✅ ${filePath}: Successfully modified ${nodeModifications.length} nodes`);
+            
+            changes.push({
+              type: 'modified',
+              file: filePath,
+              description: `Successfully modified ${nodeModifications.length} nodes`,
+              success: true,
+              details: {
+                nodesAnalyzed: astNodes.length,
+                nodesSelected: nodeAnalysis.selectedNodeIds.length,
+                nodesModified: nodeModifications.length,
+                reasoning: nodeAnalysis.reasoning
+              }
+            });
+          } else {
+            this.streamUpdate(`❌ ${filePath}: Failed to apply modifications`);
+            
+            changes.push({
+              type: 'failed',
+              file: filePath,
+              description: `Failed to apply ${nodeModifications.length} node modifications`,
+              success: false,
+              details: {
+                nodesAnalyzed: astNodes.length,
+                nodesSelected: nodeAnalysis.selectedNodeIds.length,
+                nodesModified: 0,
+                reasoning: 'File write error'
+              }
+            });
+          }
+
+        } catch (error) {
+          this.streamUpdate(`❌ Error processing ${filePath}: ${error}`);
+          
+          changes.push({
+            type: 'error',
+            file: filePath,
+            description: `Processing error: ${error}`,
+            success: false
+          });
         }
       }
-      
-      this.streamUpdate(`📊 FIXED modification complete: ${successCount}/${relevantFiles.length} files modified`);
+
+      // STEP 6: Report comprehensive results
+      this.streamUpdate(`\n🎉 GRANULAR PROCESSING COMPLETE!`);
+      this.streamUpdate(`   📁 Total files: ${projectFiles.size}`);
+      this.streamUpdate(`   🔍 Relevant files: ${relevantFiles.size}`);
+      this.streamUpdate(`   📊 Files processed: ${totalFilesProcessed}`);
+      this.streamUpdate(`   ✅ Files modified: ${totalFilesModified}`);
+      this.streamUpdate(`   🧩 Nodes analyzed: ${totalNodesAnalyzed}`);
+      this.streamUpdate(`   🎯 Nodes selected: ${totalNodesSelected}`);
+      this.streamUpdate(`   🔧 Nodes modified: ${totalNodesModified}`);
       
       const tokenStats = this.tokenTracker.getStats();
       this.streamUpdate(`💰 Token usage: ${tokenStats.totalTokens} total`);
       
       return {
-        success: successCount > 0,
+        success: totalFilesModified > 0,
         updatedProjectFiles: projectFiles,
         projectFiles: projectFiles,
         changes: changes
       };
       
     } catch (error) {
-      this.streamUpdate(`❌ Error in processTargetedModification: ${error}`);
+      this.streamUpdate(`❌ Error in granular processing: ${error}`);
       return {
         success: false,
         changes: [{
           type: 'error',
           file: 'system',
-          description: `Processing failed: ${error}`,
+          description: `Granular processing failed: ${error}`,
           success: false
         }]
       };
@@ -370,153 +299,246 @@ export class FixedTargetedNodesProcessor {
   }
 
   /**
-   * Alternative method name for compatibility
+   * STEP 2: Ask Claude to analyze file nodes and select which ones need changes
    */
-  async process(
-    prompt: string,
-    projectFiles: Map<string, ProjectFile>,
-    reactBasePath: string,
-    streamCallback: (message: string) => void
-  ) {
-    return this.processTargetedModification(prompt, projectFiles, reactBasePath, streamCallback);
-  }
+  private async analyzeFileNodes(
+    filePath: string,
+    componentName: string,
+    componentPurpose: string,
+    astNodes: ASTNode[],
+    userRequest: string
+  ): Promise<FileNodeAnalysisResponse> {
+    
+    // Create AST tree representation
+    const astTreeRepresentation = this.createASTTreeRepresentation(astNodes);
+    
+    const analysisPrompt = `
+TASK: Analyze AST nodes in a React file and determine which nodes need modification.
 
-  /**
-   * Legacy method - now calls the main processor
-   */
-  async handleTargetedModification(
-    prompt: string, 
-    projectFiles: Map<string, ProjectFile>, 
-    modificationSummary?: RedisModificationSummary | any
-  ): Promise<boolean> {
-    const result = await this.processTargetedModification(
-      prompt,
-      projectFiles,
-      this.reactBasePath,
-      (message: string) => this.streamUpdate(message)
-    );
-    
-    return result.success;
-  }
+FILE: ${filePath}
+COMPONENT: ${componentName}
+PURPOSE: ${componentPurpose}
+USER REQUEST: "${userRequest}"
 
-  private async modifyCodeSnippetsWithTemplate(
-    prompt: string, 
-    targetNodes: ASTNode[], 
-    filePath: string, 
-    projectFiles: Map<string, ProjectFile>
-  ): Promise<Map<string, string>> {
-    
-    const fileAnalysis = this.analyzeFileForTemplate(projectFiles.get(filePath));
-    const projectSummary = this.generateProjectSummary(projectFiles);
-    
-    const targetNodesFormatted = targetNodes.map(node => 
-      `**${node.id}:** (lines ${node.startLine}-${node.endLine})
-\`\`\`jsx
-${node.codeSnippet}
-\`\`\`
-`).join('\n\n');
+AST NODE TREE:
+${astTreeRepresentation}
 
-    const templateVariables = prepareTargetedNodesVariables(
-      prompt,
-      filePath,
-      fileAnalysis.componentName,
-      fileAnalysis.componentPurpose,
-      targetNodesFormatted,
-      projectSummary
-    );
-    
-    const enhancedPrompt = replaceTemplateVariables(targetedNodesPrompt, templateVariables);
+INSTRUCTIONS:
+1. Analyze each AST node to see if it needs modification for the user request
+2. Consider the component's purpose and the specific user requirements
+3. Select ONLY the nodes that actually need changes
+4. If no changes are needed, return 0
+5. Be precise - don't select unnecessary nodes
+
+RESPONSE FORMAT (JSON):
+{
+  "needsChanges": true/false,
+  "selectedNodeIds": ["node1", "node2"] or [],
+  "reasoning": "Explanation of why these nodes were selected or why no changes needed",
+  "confidence": 85
+}
+
+If no changes needed, respond with:
+{
+  "needsChanges": false,
+  "selectedNodeIds": [],
+  "reasoning": "No modifications required for this request",
+  "confidence": 90
+}
+
+ANALYSIS:`;
 
     try {
-      this.streamUpdate(`🤖 Generating modifications for ${targetNodes.length} nodes in ${filePath}...`);
+      this.streamUpdate(`🧠 Analyzing ${astNodes.length} nodes in ${filePath}...`);
       
       const response = await this.anthropic.messages.create({
         model: 'claude-3-5-sonnet-20240620',
-        max_tokens: 6000,
-        temperature: 0,
-        messages: [{ role: 'user', content: enhancedPrompt }],
+        max_tokens: 2000,
+        temperature: 0.1,
+        messages: [{ role: 'user', content: analysisPrompt }],
       });
 
-      this.tokenTracker.logUsage(response.usage, `Processing: ${targetNodes.length} nodes in ${filePath}`);
+      this.tokenTracker.logUsage(response.usage, `Node Analysis: ${filePath}`);
 
-      const firstBlock = response.content[0];
-      if (firstBlock?.type === 'text') {
-        const text = firstBlock.text;
-        const jsonMatch = text.match(/```json\n([\s\S]*?)```/) || text.match(/\{[\s\S]*\}/);
-        
-        if (jsonMatch) {
-          const jsonText = jsonMatch[1] || jsonMatch[0];
-          try {
-            const modifications = JSON.parse(jsonText);
-            const modMap = new Map<string, string>();
-            
-            for (const [nodeId, nodeData] of Object.entries(modifications)) {
-              let modifiedCode: string;
-              
-              if (typeof nodeData === 'string') {
-                modifiedCode = nodeData;
-              } else if (typeof nodeData === 'object' && nodeData !== null) {
-                const data = nodeData as any;
-                modifiedCode = data.modifiedCode || '';
-              } else {
-                continue;
-              }
-              
-              if (modifiedCode !== undefined && modifiedCode.trim() !== '') {
-                modMap.set(nodeId, modifiedCode);
-                this.streamUpdate(`✅ Generated modification for node ${nodeId}`);
-              }
-            }
-            
-            this.streamUpdate(`📝 Generated ${modMap.size} modifications for ${filePath}`);
-            return modMap;
-            
-          } catch (parseError) {
-            this.streamUpdate(`❌ JSON parse error for ${filePath}: ${parseError}`);
-            return new Map();
-          }
-        } else {
-          this.streamUpdate(`⚠️ No JSON found in response for ${filePath}`);
+      const responseText = response.content[0]?.text || '';
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      
+      if (jsonMatch) {
+        try {
+          const analysis = JSON.parse(jsonMatch[0]);
+          
+          this.streamUpdate(`📊 Analysis result: ${analysis.needsChanges ? 'NEEDS CHANGES' : 'NO CHANGES'} (${analysis.confidence}%)`);
+          
+          return {
+            needsChanges: analysis.needsChanges || false,
+            selectedNodeIds: analysis.selectedNodeIds || [],
+            reasoning: analysis.reasoning || 'Analysis completed',
+            confidence: analysis.confidence || 50
+          };
+          
+        } catch (parseError) {
+          this.streamUpdate(`❌ JSON parse error for ${filePath}: ${parseError}`);
+          return {
+            needsChanges: false,
+            selectedNodeIds: [],
+            reasoning: 'JSON parse error',
+            confidence: 0
+          };
         }
+      } else {
+        this.streamUpdate(`⚠️ No JSON found in response for ${filePath}`);
+        return {
+          needsChanges: false,
+          selectedNodeIds: [],
+          reasoning: 'No valid response format',
+          confidence: 0
+        };
       }
       
-      return new Map();
     } catch (error) {
-      this.streamUpdate(`❌ Error processing ${filePath}: ${error}`);
-      return new Map();
+      this.streamUpdate(`❌ Error analyzing nodes in ${filePath}: ${error}`);
+      return {
+        needsChanges: false,
+        selectedNodeIds: [],
+        reasoning: `Analysis error: ${error}`,
+        confidence: 0
+      };
     }
   }
 
-  private async applyModifications(
-    filePath: string, 
-    targetNodes: ASTNode[], 
-    modifications: Map<string, string>, 
-    projectFiles: Map<string, ProjectFile>,
+  /**
+   * STEP 4: Generate modifications for selected nodes
+   */
+  private async modifySelectedNodes(
+  selectedNodes: ASTNode[],
+  userRequest: string,
+  filePath: string,
+  componentInfo: { componentName: string; componentPurpose: string }
+): Promise<NodeModificationResponse[]> {
+  const nodeModifications: NodeModificationResponse[] = [];
+
+  // Create context for the nodes
+  const fileContext = `File: ${filePath}, Component: ${componentInfo.componentName} (${componentInfo.componentPurpose})`;
+
+  const modificationPrompt = `
+TASK: Modify the selected AST nodes according to the user request.
+
+USER REQUEST: "${userRequest}"
+FILE CONTEXT: ${fileContext}
+
+SELECTED NODES TO MODIFY:
+${selectedNodes.map((node, index) => `
+NODE ${index + 1}: ${node.id}
+TYPE: ${node.type || 'Unknown'}
+LINES: ${node.startLine}-${node.endLine}
+CURRENT CODE:
+\`\`\`tsx
+${node.codeSnippet}
+\`\`\`
+`).join('\n')}
+
+INSTRUCTIONS:
+1. Modify each node according to the user request
+2. Maintain all existing functionality unless explicitly changing it
+3. Keep proper TypeScript/React syntax
+4. Preserve imports, exports, and component structure
+5. Return complete modified code for each node
+
+RESPONSE FORMAT (JSON):
+{
+  "modifications": [
+    {
+      "nodeId": "${selectedNodes[0]?.id}",
+      "modifiedCode": "complete modified code here",
+      "reasoning": "explanation of changes made"
+    }
+  ]
+}
+
+MODIFICATIONS:`;
+
+  try {
+    this.streamUpdate(`🎨 Generating modifications for ${selectedNodes.length} selected nodes...`);
+
+    const response = await this.anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20240620',
+      max_tokens: 6000,
+      temperature: 0.1,
+      messages: [{ role: 'user', content: modificationPrompt }],
+    });
+
+    this.tokenTracker.logUsage(response.usage, `Node Modifications: ${filePath}`);
+
+    const responseText = response.content[0]?.text || '';
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+
+    if (jsonMatch) {
+      try {
+        const result = JSON.parse(jsonMatch[0]);
+
+        if (result.modifications && Array.isArray(result.modifications)) {
+          for (const mod of result.modifications) {
+            if (mod.nodeId && mod.modifiedCode) {
+              nodeModifications.push({
+                nodeId: mod.nodeId,
+                modifiedCode: mod.modifiedCode,
+                reasoning: mod.reasoning || 'Modified as requested'
+              });
+
+              this.streamUpdate(`✅ Generated modification for node ${mod.nodeId}`);
+            }
+          }
+        }
+      } catch (parseError) {
+        this.streamUpdate(`❌ JSON parse error for modifications: ${parseError}`);
+      }
+    } else {
+      this.streamUpdate(`⚠️ No JSON found in modification response`);
+    }
+
+  } catch (error) {
+    this.streamUpdate(`❌ Error generating modifications: ${error}`);
+  }
+
+  this.streamUpdate(`📝 Generated ${nodeModifications.length}/${selectedNodes.length} modifications`);
+  return nodeModifications;
+}
+
+
+  /**
+   * STEP 5: Apply node modifications to the file
+   */
+  private async applyNodeModifications(
+    filePath: string,
+    allNodes: ASTNode[],
+    modifications: NodeModificationResponse[],
+    projectFile: ProjectFile,
     actualPath: string
   ): Promise<boolean> {
-    const file = projectFiles.get(filePath);
-    if (!file) {
-      this.streamUpdate(`❌ File not found in project files: ${filePath}`);
-      return false;
-    }
-
-    if (modifications.size === 0) {
+    
+    if (modifications.length === 0) {
       this.streamUpdate(`⚠️ No modifications to apply for ${filePath}`);
-      return true; // Not an error if no modifications needed
+      return true;
     }
 
-    let modifiedContent = file.content;
+    let modifiedContent = projectFile.content;
     const lines = modifiedContent.split('\n');
     
+    // Create modification map
+    const modMap = new Map<string, string>();
+    for (const mod of modifications) {
+      modMap.set(mod.nodeId, mod.modifiedCode);
+    }
+    
     // Sort nodes by line number (descending) to avoid offset issues
-    const sortedNodes = targetNodes
-      .filter(node => modifications.has(node.id))
+    const nodesToModify = allNodes
+      .filter(node => modMap.has(node.id))
       .sort((a, b) => b.startLine - a.startLine);
     
-    this.streamUpdate(`🔧 Applying ${sortedNodes.length} modifications to ${filePath}...`);
+    this.streamUpdate(`🔧 Applying ${nodesToModify.length} modifications to ${filePath}...`);
     
-    for (const node of sortedNodes) {
-      const modifiedCode = modifications.get(node.id);
+    for (const node of nodesToModify) {
+      const modifiedCode = modMap.get(node.id);
       if (modifiedCode !== undefined) {
         const startIndex = Math.max(0, node.startLine - 1);
         const endIndex = Math.max(startIndex, node.endLine - 1);
@@ -535,47 +557,93 @@ ${node.codeSnippet}
       this.streamUpdate(`💾 Successfully saved modifications to ${actualPath}`);
       
       // Update the project file content in memory
-      file.content = modifiedContent;
-      file.lines = modifiedContent.split('\n').length;
+      projectFile.content = modifiedContent;
+      projectFile.lines = modifiedContent.split('\n').length;
       
       return true;
     } catch (error) {
       this.streamUpdate(`❌ Failed to save ${filePath}: ${error}`);
-      
-      // Try alternative paths
-      const alternativePaths = [
-        filePath,
-        join(process.cwd(), filePath),
-        join(this.reactBasePath, filePath)
-      ];
-      
-      for (const altPath of alternativePaths) {
-        try {
-          await fs.writeFile(altPath, modifiedContent, 'utf8');
-          this.streamUpdate(`💾 Successfully saved to alternative path: ${altPath}`);
-          file.content = modifiedContent;
-          file.lines = modifiedContent.split('\n').length;
-          return true;
-        } catch (altError) {
-          continue;
-        }
-      }
-      
       return false;
     }
   }
 
-  private analyzeFileForTemplate(file: ProjectFile | undefined): {
+  /**
+   * Create AST tree representation for Claude
+   */
+  private createASTTreeRepresentation(astNodes: ASTNode[]): string {
+  let representation = '';
+
+  for (let i = 0; i < astNodes.length; i++) {
+    const node = astNodes[i];
+    representation += `
+NODE ${i + 1}: ${node.id}
+├── Type: ${node.type || 'Unknown'}
+├── Lines: ${node.startLine}-${node.endLine}
+├── Code Preview: ${this.getCodePreview(node.codeSnippet)}
+└── Full Code:
+    \`\`\`tsx
+    ${node.codeSnippet}
+    \`\`\`
+`;
+  }
+
+  return representation;
+}
+
+
+  /**
+   * Get code preview for AST representation
+   */
+  private getCodePreview(code: string): string {
+    const firstLine = code.split('\n')[0];
+    return firstLine.length > 60 ? firstLine.substring(0, 60) + '...' : firstLine;
+  }
+
+  /**
+   * Filter to relevant files only
+   */
+  private filterRelevantFiles(projectFiles: Map<string, ProjectFile>): Map<string, ProjectFile> {
+    const relevantFiles = new Map<string, ProjectFile>();
+    
+    for (const [filePath, projectFile] of projectFiles) {
+      if (this.shouldAnalyzeFile(filePath, projectFile.content)) {
+        relevantFiles.set(filePath, projectFile);
+      }
+    }
+    
+    return relevantFiles;
+  }
+
+  /**
+   * Check if file should be analyzed
+   */
+  private shouldAnalyzeFile(filePath: string, content: string): boolean {
+    // ALWAYS analyze React/JS/TS files
+    if (filePath.match(/\.(tsx?|jsx?)$/i)) {
+      return true;
+    }
+
+    // Skip non-code files
+    const skipFileTypes = [
+      /\.css$/i, /\.scss$/i, /\.sass$/i, /\.less$/i, /\.styl$/i,
+      /\.module\.css$/i, /\.module\.scss$/i, /package\.json$/i,
+      /yarn\.lock$/i, /package-lock\.json$/i, /\.gitignore$/i,
+      /\.env$/i, /\.md$/i, /\.txt$/i, /\.log$/i,
+      /\.(png|jpg|jpeg|gif|svg|ico|webp)$/i,
+      /\.(mp4|mp3|wav|avi)$/i,
+      /dist\//i, /build\//i, /node_modules\//i, /\.next\//i, /\.git\//i
+    ];
+
+    return !skipFileTypes.some(pattern => pattern.test(filePath));
+  }
+
+  /**
+   * Analyze file for template variables
+   */
+  private analyzeFileForTemplate(file: ProjectFile): {
     componentName: string;
     componentPurpose: string;
   } {
-    if (!file) {
-      return {
-        componentName: 'Unknown',
-        componentPurpose: 'File component'
-      };
-    }
-    
     const content = file.content;
     
     // Extract component name
@@ -602,31 +670,111 @@ ${node.codeSnippet}
       componentPurpose = 'Functional component';
     }
     
-    return {
-      componentName,
-      componentPurpose
-    };
+    return { componentName, componentPurpose };
   }
 
-  private generateProjectSummary(projectFiles: Map<string, ProjectFile>): string {
-    const totalFiles = projectFiles.size;
-    const componentFiles = Array.from(projectFiles.keys()).filter(path => 
-      path.match(/\.(tsx?|jsx?)$/i)
-    ).length;
+  // ============================================================================
+  // BACKWARD COMPATIBILITY METHODS
+  // ============================================================================
+
+  /**
+   * Main method matching expected interface
+   */
+  async processTargetedModification(
+    prompt: string,
+    projectFiles: Map<string, ProjectFile>,
+    reactBasePath: string,
+    streamCallback: (message: string) => void
+  ) {
+    return this.processGranularModification(prompt, projectFiles, reactBasePath, streamCallback);
+  }
+
+  /**
+   * Alternative method name for compatibility
+   */
+  async process(
+    prompt: string,
+    projectFiles: Map<string, ProjectFile>,
+    reactBasePath: string,
+    streamCallback: (message: string) => void
+  ) {
+    return this.processGranularModification(prompt, projectFiles, reactBasePath, streamCallback);
+  }
+
+  /**
+   * Legacy method
+   */
+  async handleTargetedModification(
+    prompt: string, 
+    projectFiles: Map<string, ProjectFile>, 
+    modificationSummary?: RedisModificationSummary | any
+  ): Promise<boolean> {
+    const result = await this.processGranularModification(
+      prompt,
+      projectFiles,
+      this.reactBasePath,
+      (message: string) => this.streamUpdate(message)
+    );
     
-    const componentPaths = Array.from(projectFiles.keys())
-      .filter(path => path.includes('/components/'))
-      .slice(0, 5);
-    
-    let summary = `React project with ${totalFiles} files (${componentFiles} component/JS files). `;
-    
-    if (componentPaths.length > 0) {
-      summary += `Components: ${componentPaths.join(', ')}.`;
-    }
-    
-    return summary;
+    return result.success;
   }
 }
 
-// Export both the new class and maintain compatibility
-export { FixedTargetedNodesProcessor as TargetedNodesProcessor };
+// Export for compatibility
+export { GranularASTProcessor as TargetedNodesProcessor };
+
+// ============================================================================
+// INTEGRATION INSTRUCTIONS
+// ============================================================================
+
+/*
+## HOW TO INTEGRATE THIS GRANULAR PROCESSOR:
+
+### 1. Replace your imports:
+```typescript
+// REPLACE:
+import { EnhancedTargetedNodesProcessor } from './EnhancedTargetedNodesProcessor';
+
+// WITH:
+import { GranularASTProcessor } from './GranularASTProcessor';
+```
+
+### 2. Update initialization:
+```typescript
+// REPLACE:
+this.targetedProcessor = new EnhancedTargetedNodesProcessor(anthropic, tokenTracker, astAnalyzer, reactBasePath);
+
+// WITH:
+this.granularProcessor = new GranularASTProcessor(anthropic, tokenTracker, astAnalyzer, reactBasePath);
+```
+
+### 3. Update method calls:
+```typescript
+// All existing method calls will work the same:
+const result = await this.granularProcessor.processTargetedModification(
+  prompt,
+  projectFiles,
+  reactBasePath,
+  streamCallback
+);
+```
+
+## GRANULAR PROCESSING FLOW:
+
+1. **📁 Filter Files**: Select only relevant React/JS/TS files for analysis
+2. **🔍 Parse AST**: Extract AST nodes for each file individually  
+3. **🧠 Ask Claude**: "Does this file need changes? Which nodes?"
+4. **🎯 Node Selection**: Claude responds with specific node IDs or "0" if no changes
+5. **🎨 Generate Modifications**: For selected nodes, generate new code
+6. **💾 Apply Changes**: Update only the selected nodes in the file
+
+## KEY BENEFITS:
+
+✅ **PRECISE TARGETING**: Only modifies nodes that actually need changes
+✅ **GRANULAR CONTROL**: File-by-file and node-by-node analysis
+✅ **INTELLIGENT SELECTION**: Claude decides which nodes need modification
+✅ **MINIMAL CHANGES**: Preserves all unrelated code unchanged
+✅ **COMPREHENSIVE REPORTING**: Detailed statistics on analysis and modifications
+
+This approach is much more surgical and precise than bulk processing!
+*/

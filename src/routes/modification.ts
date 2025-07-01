@@ -1,4 +1,4 @@
-// routes/modification.ts - FIXED File modification routes with updated Azure deployment
+// routes/modification.ts - Updated with simple URL management by userId
 import express, { Request, Response } from "express";
 import { StatelessIntelligentFileModifier } from '../services/filemodifier';
 import { StatelessSessionManager } from './session';
@@ -33,10 +33,10 @@ class StatelessConversationHelper {
     
     // Save to Redis session state (fast access) - using proper ModificationChange interface
     const change = {
-      type: 'modified' as const, // Use proper type from your ModificationChange interface
-      file: 'session_modification', // Required field
-      description: `${modification.approach}: ${modification.prompt.substring(0, 100)}...`, // Required field
-       timestamp: new Date().toISOString(), 
+      type: 'modified' as const,
+      file: 'session_modification',
+      description: `${modification.approach}: ${modification.prompt.substring(0, 100)}...`,
+      timestamp: new Date().toISOString(), 
       prompt: modification.prompt,
       approach: modification.approach,
       filesModified: modification.filesModified || [],
@@ -84,7 +84,72 @@ class StatelessConversationHelper {
   }
 }
 
-// Utility functions
+// SIMPLE URL MANAGEMENT FUNCTION
+async function saveProjectUrlsByUserId(
+  messageDB: DrizzleMessageHistoryDB,
+  userId: number,
+  buildId: string,
+  urls: {
+    deploymentUrl: string;
+    downloadUrl: string;
+    zipUrl: string;
+  },
+  sessionId: string,
+  prompt?: string
+): Promise<{ projectId: number; action: 'created' | 'updated' }> {
+  try {
+    console.log(`📊 Simple URL Management - User: ${userId}, Build: ${buildId}`);
+
+    // Get user's most recent project
+    const userProjects = await messageDB.getUserProjects(userId);
+    
+    if (userProjects.length > 0) {
+      // Update the most recent project
+      const project = userProjects[0]; // Most recent project
+      
+      await messageDB.updateProjectUrls(project.id, {
+        deploymentUrl: urls.deploymentUrl,
+        downloadUrl: urls.downloadUrl,
+        zipUrl: urls.zipUrl,
+        buildId: buildId,
+        status: 'ready',
+        lastSessionId: sessionId,
+        lastMessageAt: new Date(),
+        updatedAt: new Date()
+      });
+      
+      console.log(`✅ Updated existing project ${project.id} for user ${userId}`);
+      return { projectId: project.id, action: 'updated' };
+      
+    } else {
+      // Create new project for user
+      const projectId = await messageDB.createProject({
+        userId: userId,
+        name: `Project ${buildId.slice(0, 8)}`,
+        description: prompt?.substring(0, 200) || 'Auto-generated from modification',
+        status: 'ready',
+        projectType: 'frontend',
+        deploymentUrl: urls.deploymentUrl,
+        downloadUrl: urls.downloadUrl,
+        zipUrl: urls.zipUrl,
+        buildId: buildId,
+        lastSessionId: sessionId,
+        framework: 'react',
+        template: 'vite-react-ts',
+        lastMessageAt: new Date(),
+        messageCount: 1
+      });
+      
+      console.log(`✅ Created new project ${projectId} for user ${userId}`);
+      return { projectId, action: 'created' };
+    }
+  } catch (error) {
+    console.error('❌ Failed to save project URLs:', error);
+    throw error;
+  }
+}
+
+// Utility functions (unchanged)
 async function downloadAndExtractProject(buildId: string, zipUrl: string): Promise<string> {
   const tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
   
@@ -141,111 +206,85 @@ export function initializeModificationRoutes(
   const conversationHelper = new StatelessConversationHelper(messageDB, redis);
 
   // STATELESS STREAMING MODIFICATION ENDPOINT
-  router.post("/stream", async (req: Request, res: Response): Promise<void> => {
-    const { prompt, sessionId: clientSessionId } = req.body;
-    
-    if (!prompt) {
-      res.status(400).json({
-        success: false,
-        error: "Prompt is required"
-      });
-      return;
+ router.post("/stream", async (req: Request, res: Response): Promise<void> => {
+  const { 
+    prompt, 
+    sessionId: clientSessionId,
+    userId = 1 // Default userId, should come from authentication
+  } = req.body;
+  
+  if (!prompt) {
+    res.status(400).json({
+      success: false,
+      error: "Prompt is required"
+    });
+    return;
+  }
+
+  const sessionId = clientSessionId || sessionManager.generateSessionId();
+  const buildId = uuidv4();
+  
+  console.log(`[${buildId}] Starting modification for user: ${userId}, session: ${sessionId}`);
+  console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': 'http://localhost:5173',
+    'Access-Control-Allow-Credentials': 'true'
+  });
+
+  const sendEvent = (type: string, data: any) => {
+    console.log(`📤 Sending ${type} event:`, data);
+    res.write(`event: ${type}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const cleanupTimer = setTimeout(() => {
+    cleanupTempDirectory(buildId);
+    sessionManager.cleanup(sessionId);
+  }, 5 * 60 * 1000);
+
+  try {
+    sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
+
+    let sessionContext = await sessionManager.getSessionContext(sessionId);
+    let tempBuildDir: string = '';
+    let userProject = null;
+
+    const userProjects = await messageDB.getUserProjects(userId);
+    if (userProjects.length > 0) {
+      userProject = userProjects[0];
+      if (userProject.zipUrl) {
+        sendEvent('progress', { step: 2, total: 16, message: `Found user's project: ${userProject.name}. Downloading...`, buildId, sessionId });
+        tempBuildDir = await downloadAndExtractProject(buildId, userProject.zipUrl);
+        sessionContext = {
+          buildId,
+          tempBuildDir,
+          projectSummary: {
+            summary: userProject.description || 'User project',
+            zipUrl: userProject.zipUrl,
+            buildId: userProject.buildId
+          },
+          lastActivity: Date.now()
+        };
+        await sessionManager.saveSessionContext(sessionId, sessionContext);
+      }
     }
 
-    // Use provided session ID or generate new one
-    const sessionId = clientSessionId || sessionManager.generateSessionId();
-    const buildId = uuidv4();
-    
-    console.log(`[${buildId}] Starting stateless streaming modification for session: ${sessionId}`);
-    console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
+    if (!sessionContext || !sessionContext.projectSummary?.zipUrl) {
+      sendEvent('progress', { step: 2, total: 16, message: 'No user project found. Checking Redis...', buildId, sessionId });
 
-    // Set up Server-Sent Events
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': 'http://localhost:5173',
-      'Access-Control-Allow-Credentials': 'true'
-    });
+      sessionContext = await sessionManager.getSessionContext(sessionId);
 
-    const sendEvent = (type: string, data: any) => {
-      console.log(`📤 Sending ${type} event:`, data);
-      res.write(`event: ${type}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const cleanupTimer = setTimeout(() => {
-      cleanupTempDirectory(buildId);
-      sessionManager.cleanup(sessionId);
-    }, 5 * 60 * 1000);
-
-    try {
-      sendEvent('progress', { 
-        step: 1, 
-        total: 15,
-        message: 'Initializing stateless modification system and checking Redis cache...',
-        buildId: buildId,
-        sessionId: sessionId
-      });
-
-      // Get project context from Redis OR database
-      let sessionContext = await sessionManager.getSessionContext(sessionId);
-      let tempBuildDir: string;
-
-      if (sessionContext && sessionContext.projectSummary && sessionContext.projectSummary.zipUrl) {
-        sendEvent('progress', { 
-          step: 2, 
-          total: 15, 
-          message: 'Found existing project in Redis cache! Downloading latest project ZIP...',
-          buildId: buildId,
-          sessionId: sessionId
-        });
-
+      if (sessionContext?.projectSummary?.zipUrl) {
         tempBuildDir = await downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
-        
-        sendEvent('progress', { 
-          step: 3, 
-          total: 15, 
-          message: 'Project downloaded! Loading cached files from Redis...',
-          buildId: buildId,
-          sessionId: sessionId
-        });
-
-        const cachedFiles = await sessionManager.getCachedProjectFiles(sessionId);
-        if (Object.keys(cachedFiles).length > 0) {
-          console.log(`📦 Found ${Object.keys(cachedFiles).length} cached files in Redis for session: ${sessionId}`);
-          sendEvent('progress', { 
-            step: 4, 
-            total: 15, 
-            message: `Loaded ${Object.keys(cachedFiles).length} files from Redis cache! Proceeding with stateless modification...`,
-            buildId: buildId,
-            sessionId: sessionId
-          });
-        }
-        
       } else {
-        // Fallback to database check
-        sendEvent('progress', { 
-          step: 2, 
-          total: 15, 
-          message: 'No Redis session found. Checking database for existing project...',
-          buildId: buildId,
-          sessionId: sessionId
-        });
-
         const projectSummary = await messageDB.getActiveProjectSummary();
-        
-        if (projectSummary && projectSummary.zipUrl) {
-          sendEvent('progress', { 
-            step: 3, 
-            total: 15, 
-            message: 'Found existing project in database! Downloading and caching in Redis...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
 
+        if (projectSummary?.zipUrl) {
           tempBuildDir = await downloadAndExtractProject(buildId, projectSummary.zipUrl);
-          
           sessionContext = {
             buildId,
             tempBuildDir,
@@ -257,46 +296,9 @@ export function initializeModificationRoutes(
             lastActivity: Date.now()
           };
           await sessionManager.saveSessionContext(sessionId, sessionContext);
-
-          // Cache project files in Redis
-          const projectFiles: { [path: string]: string } = {};
-          const readProjectFiles = async (dir: string, baseDir: string = dir) => {
-            const entries = await fs.promises.readdir(dir, { withFileTypes: true });
-            for (const entry of entries) {
-              const fullPath = path.join(dir, entry.name);
-              if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
-                await readProjectFiles(fullPath, baseDir);
-              } else if (entry.isFile() && (entry.name.endsWith('.tsx') || entry.name.endsWith('.ts') || entry.name.endsWith('.jsx') || entry.name.endsWith('.js'))) {
-                const relativePath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
-                const content = await fs.promises.readFile(fullPath, 'utf8');
-                projectFiles[relativePath] = content;
-              }
-            }
-          };
-          
-          await readProjectFiles(tempBuildDir);
-          await sessionManager.cacheProjectFiles(sessionId, projectFiles);
-          
-          sendEvent('progress', { 
-            step: 4, 
-            total: 15, 
-            message: `Cached ${Object.keys(projectFiles).length} files in Redis! Ready for stateless modification...`,
-            buildId: buildId,
-            sessionId: sessionId
-          });
-          
         } else {
-          sendEvent('progress', { 
-            step: 3, 
-            total: 15, 
-            message: 'No existing project found. Creating new project from template...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-
           const sourceTemplateDir = path.join(__dirname, "../../react-base");
           tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
-
           await fs.promises.mkdir(tempBuildDir, { recursive: true });
           await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
 
@@ -306,373 +308,223 @@ export function initializeModificationRoutes(
             lastActivity: Date.now()
           };
           await sessionManager.saveSessionContext(sessionId, sessionContext);
-
-          sendEvent('progress', { 
-            step: 4, 
-            total: 15, 
-            message: 'New project template created successfully!',
-            buildId: buildId,
-            sessionId: sessionId
-          });
         }
       }
+    }
 
-      // Update session context
-      await sessionManager.updateSessionContext(sessionId, { 
-        buildId, 
-        tempBuildDir,
-        lastActivity: Date.now() 
-      });
+    // ✅ Now tempBuildDir is guaranteed to be defined
 
-      // Get enhanced context
-      let enhancedPrompt = prompt;
+    sendEvent('progress', { step: 3, total: 16, message: 'Project environment ready!', buildId, sessionId });
+
+    await sessionManager.updateSessionContext(sessionId, {
+      buildId,
+      tempBuildDir,
+      lastActivity: Date.now()
+    });
+
+    let enhancedPrompt = prompt;
+    try {
+      const context = await conversationHelper.getEnhancedContext(sessionId);
+      if (context) {
+        enhancedPrompt = `${context}\n\n--- CURRENT REQUEST ---\n${prompt}`;
+        sendEvent('progress', { step: 4, total: 16, message: 'Loaded conversation context!', buildId, sessionId });
+      }
+    } catch {
+      sendEvent('progress', { step: 4, total: 16, message: 'Continuing with fresh modification...', buildId, sessionId });
+    }
+
+    const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
+    fileModifier.setStreamCallback((message) => sendEvent('progress', { step: 7, total: 16, message, buildId, sessionId }));
+
+    sendEvent('progress', { step: 5, total: 16, message: 'Starting intelligent modification...', buildId, sessionId });
+
+    const startTime = Date.now();
+
+    const result = await fileModifier.processModification(
+      enhancedPrompt,
+      undefined,
+      sessionContext?.projectSummary?.summary,
+      async (summary, prompt) => {
+        try {
+          const summaryId = await messageDB.saveProjectSummary(summary, prompt, "", buildId);
+          console.log(`💾 Saved project summary, ID: ${summaryId}`);
+          return summaryId;
+        } catch (err) {
+          console.error('⚠️ Error saving summary:', err);
+          return null;
+        }
+      }
+    );
+
+    const modificationDuration = Date.now() - startTime;
+
+    if (result.success) {
+      sendEvent('progress', { step: 8, total: 16, message: 'Modification complete! Building...', buildId, sessionId });
+
       try {
-        const context = await conversationHelper.getEnhancedContext(sessionId);
-        if (context) {
-          enhancedPrompt = `${context}\n\n--- CURRENT REQUEST ---\n${prompt}`;
-          sendEvent('progress', { 
-            step: 5, 
-            total: 15, 
-            message: 'Successfully loaded conversation context from Redis! Using rich context for intelligent modification...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-        } else {
-          sendEvent('progress', { 
-            step: 5, 
-            total: 15, 
-            message: 'No previous conversation context found. Starting fresh stateless analysis...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-        }
-      } catch (contextError) {
-        sendEvent('progress', { 
-          step: 5, 
-          total: 15, 
-          message: 'Context loading encountered an issue, continuing with stateless modification...',
-          buildId: buildId,
-          sessionId: sessionId
-        });
-      }
+        const zip = new AdmZip();
+        zip.addLocalFolder(tempBuildDir);
+        const zipBuffer = zip.toBuffer();
 
-      // Initialize stateless file modifier - FIXED CONSTRUCTOR
-      const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
-      
-      fileModifier.setStreamCallback((message: string) => {
-        sendEvent('progress', { 
-          step: 8, 
-          total: 15, 
-          message: message,
-          buildId: buildId,
-          sessionId: sessionId
-        });
-      });
+        const zipBlobName = `${buildId}/source.zip`;
+        const zipUrl = await uploadToAzureBlob(
+          process.env.AZURE_STORAGE_CONNECTION_STRING!,
+          "source-zips",
+          zipBlobName,
+          zipBuffer
+        );
 
-      sendEvent('progress', { 
-        step: 6, 
-        total: 15, 
-        message: 'Stateless file modifier initialized with Redis backing! Analyzing project structure...',
-        buildId: buildId,
-        sessionId: sessionId
-      });
+        sendEvent('progress', { step: 10, total: 16, message: 'Building app...', buildId, sessionId });
 
-      const startTime = Date.now();
-      
-      // Process modification
-      const result = await fileModifier.processModification(
-        enhancedPrompt,
-        undefined,
-        sessionContext?.projectSummary?.summary,
-        async (summary: string, prompt: string) => {
-          try {
-            const summaryId = await messageDB.saveProjectSummary(summary, prompt, "", buildId);
-            console.log(`💾 Saved project summary to database, ID: ${summaryId}`);
-            return summaryId;
-          } catch (error) {
-            console.error('⚠️ Error saving project summary:', error);
-            return null;
-          }
-        }
-      );
-      
-      const modificationDuration = Date.now() - startTime;
-      
-      if (result.success) {
-        sendEvent('progress', { 
-          step: 9, 
-          total: 15, 
-          message: `Stateless modification completed successfully in ${modificationDuration}ms! Applied ${result.approach} approach. Writing changes to files...`,
-          buildId: buildId,
-          sessionId: sessionId
+        const DistUrl = await triggerAzureContainerJob(zipUrl, buildId, {
+          resourceGroup: process.env.AZURE_RESOURCE_GROUP!,
+          containerAppEnv: process.env.AZURE_CONTAINER_APP_ENV!,
+          acrName: process.env.AZURE_ACR_NAME!,
+          storageConnectionString: process.env.AZURE_STORAGE_CONNECTION_STRING!,
+          storageAccountName: process.env.AZURE_STORAGE_ACCOUNT_NAME!,
         });
 
-        // CRITICAL: Ensure changes are written to actual files before build
-        try {
-          sendEvent('progress', { 
-            step: 9.5, 
-            total: 15, 
-            message: 'Ensuring all Redis changes are written to temp files...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-          // The fileModifier.writeChangesToFiles() is already called inside processModification
-          sendEvent('progress', { 
-            step: 9.7, 
-            total: 15, 
-            message: 'All changes written to temp files successfully',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-        } catch (writeError) {
-          console.error('Failed to write changes to files:', writeError);
-          sendEvent('error', {
-            success: false,
-            error: 'Failed to write modifications to files',
-            //@ts-ignore
-            details: writeError.message,
-            buildId: buildId,
-            sessionId: sessionId
-          });
-          return;
-        }
+        const urls = JSON.parse(DistUrl);
+        const builtZipUrl = urls.downloadUrl;
 
-        // Save modification
-        try {
-          await conversationHelper.saveModification(sessionId, {
-            prompt,
-            result,
-            approach: result.approach || 'UNKNOWN',
-            filesModified: result.selectedFiles || [],
-            filesCreated: result.addedFiles || [],
-            timestamp: new Date().toISOString()
-          });
-        } catch (saveError) {
-          console.error('Failed to save modification to history:', saveError);
-        }
+        sendEvent('progress', { step: 11, total: 16, message: 'Deploying...', buildId, sessionId });
+        const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
-        // BUILD & DEPLOY PIPELINE - UPDATED
-        try {
-          sendEvent('progress', { 
-            step: 10, 
-            total: 15, 
-            message: 'Starting build & deploy pipeline with written changes...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
+        sendEvent('progress', { step: 12, total: 16, message: 'Updating database...', buildId, sessionId });
 
-          // DEBUG: Check what files exist in tempBuildDir before zipping
-          console.log(`[${buildId}] DEBUG: Checking temp directory contents AFTER modification...`);
-          const files = await fs.promises.readdir(tempBuildDir, { recursive: true });
-          console.log(`[${buildId}] Files in temp directory:`, files.slice(0, 20));
-          
-          // Check if React files were actually modified
-          const srcDir = path.join(tempBuildDir, 'src');
-          if (await fs.promises.access(srcDir).then(() => true).catch(() => false)) {
-            const srcFiles = await fs.promises.readdir(srcDir, { recursive: true });
-            console.log(`[${buildId}] React files in src/:`, srcFiles);
-            
-            // Check timestamps of modified files
-            for (const file of srcFiles.slice(0, 5)) {
-              const filePath = path.join(srcDir, file);
-              try {
-                const stats = await fs.promises.stat(filePath);
-                console.log(`[${buildId}] ${file} modified: ${stats.mtime}`);
-              } catch (e) {
-                //@ts-ignore
-                console.log(`[${buildId}] Could not check ${file}:`, e.message);
-              }
-            }
+        await sessionManager.updateSessionContext(sessionId, {
+          projectSummary: {
+            ...sessionContext?.projectSummary,
+            zipUrl,
+            buildId
           }
-          
-          // Check for package.json
-          const packageJsonPath = path.join(tempBuildDir, 'package.json');
-          try {
-            const packageJson = JSON.parse(await fs.promises.readFile(packageJsonPath, 'utf8'));
-            console.log(`[${buildId}] Package.json found with dependencies:`, Object.keys(packageJson.dependencies || {}));
-          } catch {
-            console.log(`[${buildId}] ❌ No package.json found at: ${packageJsonPath}`);
-          }
-
-          const zip = new AdmZip();
-          zip.addLocalFolder(tempBuildDir);
-          const zipBuffer = zip.toBuffer();
-
-          const zipBlobName = `${buildId}/source.zip`;
-          const zipUrl = await uploadToAzureBlob(
-            process.env.AZURE_STORAGE_CONNECTION_STRING!,
-            "source-zips",
-            zipBlobName,
-            zipBuffer
-          );
-
-          sendEvent('progress', { 
-            step: 11, 
-            total: 15, 
-            message: 'Source uploaded! Triggering containerized build process...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-          
-          const DistUrl = await triggerAzureContainerJob(zipUrl, buildId, {
-            resourceGroup: process.env.AZURE_RESOURCE_GROUP!,
-            containerAppEnv: process.env.AZURE_CONTAINER_APP_ENV!,
-            acrName: process.env.AZURE_ACR_NAME!,
-            storageConnectionString: process.env.AZURE_STORAGE_CONNECTION_STRING!,
-            storageAccountName: process.env.AZURE_STORAGE_ACCOUNT_NAME!,
-          });
-
-          const urls = JSON.parse(DistUrl);
-          const builtZipUrl = urls.downloadUrl;
-
-          sendEvent('progress', { 
-            step: 12, 
-            total: 15, 
-            message: 'Build completed! Deploying with new Azure method...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-          
-          // Use the new deployment method
-          const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
-
-          sendEvent('progress', { 
-            step: 13, 
-            total: 15, 
-            message: 'Updating Redis session and project summary with latest changes...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-
-          // Update session context
-          await sessionManager.updateSessionContext(sessionId, {
-            projectSummary: {
-              ...sessionContext?.projectSummary,
-              zipUrl: zipUrl,
-              buildId: buildId
-            }
-          });
-
-          // Update database
-          if (sessionContext?.projectSummary) {
-            const projectSummary = await messageDB.getActiveProjectSummary();
-            if (projectSummary) {
-              await messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
-            }
-          }
-
-          sendEvent('progress', { 
-            step: 14, 
-            total: 15, 
-            message: 'Cleaning up temporary files...',
-            buildId: buildId,
-            sessionId: sessionId
-          });
-
-          clearTimeout(cleanupTimer);
-          await cleanupTempDirectory(buildId);
-
-          sendEvent('progress', { 
-            step: 15, 
-            total: 15, 
-            message: `🎉 Complete stateless pipeline finished! Your updated application is live at: ${previewUrl}`,
-            buildId: buildId,
-            sessionId: sessionId
-          });
-
-          const totalDuration = Date.now() - startTime;
-
-          // Send final result
-          sendEvent('complete', {
-            success: true,
-            data: {
-              workflow: "stateless-modification-system-with-redis-build",
-              approach: result.approach || 'UNKNOWN',
-              selectedFiles: result.selectedFiles || [],
-              addedFiles: result.addedFiles || [],
-              modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (result.modifiedRanges?.length || 0),
-              conversationContext: "Enhanced context with Redis-backed stateless modification history",
-              reasoning: result.reasoning,
-              modificationSummary: result.modificationSummary,
-              modificationDuration: modificationDuration,
-              totalDuration: totalDuration,
-              totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
-              previewUrl: previewUrl,
-              downloadUrl: urls.downloadUrl,
-              zipUrl: zipUrl,
-              buildId: buildId,
-              sessionId: sessionId,
-              hosting: "Azure Static Web Apps",
-              features: [
-                "Global CDN",
-                "Auto SSL/HTTPS", 
-                "Custom domains support",
-                "Staging environments",
-              ]
-            }
-          });
-
-        } catch (buildError) {
-          console.error(`[${buildId}] Build pipeline failed:`, buildError);
-          
-          clearTimeout(cleanupTimer);
-          await cleanupTempDirectory(buildId);
-          
-          sendEvent('complete', {
-            success: true,
-            data: {
-              workflow: "stateless-modification-system-with-redis-build-error",
-              approach: result.approach || 'UNKNOWN',
-              selectedFiles: result.selectedFiles || [],
-              addedFiles: result.addedFiles || [],
-              modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (result.modifiedRanges?.length || 0),
-              buildError: buildError instanceof Error ? buildError.message : 'Build failed',
-              buildId: buildId,
-              sessionId: sessionId,
-              message: "Stateless modification completed successfully, but build/deploy failed"
-            }
-          });
-        }
-
-        await fileModifier.cleanup();
-
-      } else {
-        sendEvent('error', {
-          success: false,
-          error: result.error || 'Stateless modification failed',
-          approach: result.approach,
-          reasoning: result.reasoning,
-          buildId: buildId,
-          sessionId: sessionId
         });
 
+        if (sessionContext?.projectSummary) {
+          const projectSummary = await messageDB.getActiveProjectSummary();
+          if (projectSummary) {
+            await messageDB.updateProjectSummary(projectSummary.id, zipUrl, buildId);
+          }
+        }
+
+        sendEvent('progress', { step: 13, total: 16, message: 'Saving URLs...', buildId, sessionId });
+
+        const urlResult = await saveProjectUrlsByUserId(
+          messageDB,
+          userId,
+          buildId,
+          {
+            deploymentUrl: previewUrl as string,
+            downloadUrl: urls.downloadUrl,
+            zipUrl
+          },
+          sessionId,
+          prompt
+        );
+
+        sendEvent('progress', { step: 14, total: 16, message: 'Cleaning up...', buildId, sessionId });
         clearTimeout(cleanupTimer);
         await cleanupTempDirectory(buildId);
+
+        sendEvent('progress', { step: 15, total: 16, message: `🎉 Live at: ${previewUrl}`, buildId, sessionId });
+
+        const totalDuration = Date.now() - startTime;
+
+        sendEvent('complete', {
+          success: true,
+          data: {
+            workflow: "simple-user-based-modification",
+            approach: result.approach || 'UNKNOWN',
+            selectedFiles: result.selectedFiles || [],
+            addedFiles: result.addedFiles || [],
+            modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (result.modifiedRanges?.length || 0),
+            reasoning: result.reasoning,
+            modificationSummary: result.modificationSummary,
+            modificationDuration,
+            totalDuration,
+            totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
+            previewUrl,
+            downloadUrl: urls.downloadUrl,
+            zipUrl,
+            buildId,
+            sessionId,
+            userId,
+            projectId: urlResult.projectId,
+            projectAction: urlResult.action,
+            hosting: "Azure Static Web Apps",
+            features: [
+              "Global CDN",
+              "Auto SSL/HTTPS", 
+              "Custom domains support",
+              "Staging environments",
+            ]
+          }
+        });
+
         await fileModifier.cleanup();
+
+      } catch (buildError) {
+        console.error(`[${buildId}] Build pipeline failed:`, buildError);
+        clearTimeout(cleanupTimer);
+        await cleanupTempDirectory(buildId);
+
+        sendEvent('complete', {
+          success: true,
+          data: {
+            workflow: "simple-user-based-modification-error",
+            approach: result.approach || 'UNKNOWN',
+            buildError: buildError instanceof Error ? buildError.message : 'Build failed',
+            buildId,
+            sessionId,
+            userId,
+            message: "Modification completed, but build/deploy failed"
+          }
+        });
       }
 
-    } catch (error: any) {
-      console.error(`[${buildId}] ❌ Stateless streaming error:`, error);
-      
-      clearTimeout(cleanupTimer);
-      await cleanupTempDirectory(buildId);
-      
+    } else {
       sendEvent('error', {
         success: false,
-        error: 'Internal server error during stateless modification',
-        details: error.message,
-        buildId: buildId,
-        sessionId: sessionId
+        error: result.error || 'Modification failed',
+        approach: result.approach,
+        reasoning: result.reasoning,
+        buildId,
+        sessionId,
+        userId
       });
-    } finally {
-      res.end();
-    }
-  });
 
-  // NON-STREAMING STATELESS MODIFICATION - UPDATED
+      clearTimeout(cleanupTimer);
+      await cleanupTempDirectory(buildId);
+      await fileModifier.cleanup();
+    }
+
+  } catch (error: any) {
+    console.error(`[${buildId}] ❌ Error:`, error);
+    clearTimeout(cleanupTimer);
+    await cleanupTempDirectory(buildId);
+
+    sendEvent('error', {
+      success: false,
+      error: 'Internal server error during modification',
+      details: error.message,
+      buildId,
+      sessionId,
+      userId
+    });
+  } finally {
+    res.end();
+  }
+});
+
+
+  // NON-STREAMING MODIFICATION ENDPOINT
   router.post("/", async (req: Request, res: Response): Promise<void> => {
     try {
-      const { prompt, sessionId: clientSessionId } = req.body;
+      const { 
+        prompt, 
+        sessionId: clientSessionId,
+        userId = 1 // Default userId, should come from authentication
+      } = req.body;
       
       if (!prompt) {
         res.status(400).json({
@@ -684,7 +536,7 @@ export function initializeModificationRoutes(
 
       const sessionId = clientSessionId || sessionManager.generateSessionId();
       const buildId = uuidv4();
-      console.log(`[${buildId}] Starting stateless non-streaming modification for session: ${sessionId}`);
+      console.log(`[${buildId}] Starting non-streaming modification for user: ${userId}`);
 
       const cleanupTimer = setTimeout(() => {
         cleanupTempDirectory(buildId);
@@ -692,47 +544,60 @@ export function initializeModificationRoutes(
       }, 5 * 60 * 1000);
 
       try {
-        // Get project context from Redis OR database
+        // Get user's most recent project
         let sessionContext = await sessionManager.getSessionContext(sessionId);
         let tempBuildDir: string;
-
-        if (sessionContext && sessionContext.projectSummary && sessionContext.projectSummary.zipUrl) {
-          console.log(`[${buildId}] Found existing project in Redis, downloading ZIP...`);
-          tempBuildDir = await downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
+        
+        const userProjects = await messageDB.getUserProjects(userId);
+        if (userProjects.length > 0 && userProjects[0].zipUrl) {
+          console.log(`[${buildId}] Found user's project: ${userProjects[0].name}`);
+          tempBuildDir = await downloadAndExtractProject(buildId, userProjects[0].zipUrl);
+          sessionContext = {
+            buildId,
+            tempBuildDir,
+            projectSummary: {
+              summary: userProjects[0].description || 'User project',
+              zipUrl: userProjects[0].zipUrl,
+              buildId: userProjects[0].buildId
+            },
+            lastActivity: Date.now()
+          };
+          await sessionManager.saveSessionContext(sessionId, sessionContext);
         } else {
-          console.log(`[${buildId}] No Redis session, checking database...`);
-          const projectSummary = await messageDB.getActiveProjectSummary();
-          
-          if (projectSummary && projectSummary.zipUrl) {
-            console.log(`[${buildId}] Found existing project in database, downloading and caching...`);
-            tempBuildDir = await downloadAndExtractProject(buildId, projectSummary.zipUrl);
-            
-            sessionContext = {
-              buildId,
-              tempBuildDir,
-              projectSummary: {
-                summary: projectSummary.summary,
-                zipUrl: projectSummary.zipUrl,
-                buildId: projectSummary.buildId
-              },
-              lastActivity: Date.now()
-            };
-            await sessionManager.saveSessionContext(sessionId, sessionContext);
-            
+          // Fallback to existing logic
+          sessionContext = await sessionManager.getSessionContext(sessionId);
+          if (sessionContext && sessionContext.projectSummary && sessionContext.projectSummary.zipUrl) {
+            tempBuildDir = await downloadAndExtractProject(buildId, sessionContext.projectSummary.zipUrl);
           } else {
-            console.log(`[${buildId}] No existing project, creating from template...`);
-            const sourceTemplateDir = path.join(__dirname, "../../react-base");
-            tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
+            const projectSummary = await messageDB.getActiveProjectSummary();
+            
+            if (projectSummary && projectSummary.zipUrl) {
+              tempBuildDir = await downloadAndExtractProject(buildId, projectSummary.zipUrl);
+              sessionContext = {
+                buildId,
+                tempBuildDir,
+                projectSummary: {
+                  summary: projectSummary.summary,
+                  zipUrl: projectSummary.zipUrl,
+                  buildId: projectSummary.buildId
+                },
+                lastActivity: Date.now()
+              };
+              await sessionManager.saveSessionContext(sessionId, sessionContext);
+            } else {
+              const sourceTemplateDir = path.join(__dirname, "../../react-base");
+              tempBuildDir = path.join(__dirname, "../../temp-builds", buildId);
 
-            await fs.promises.mkdir(tempBuildDir, { recursive: true });
-            await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
+              await fs.promises.mkdir(tempBuildDir, { recursive: true });
+              await fs.promises.cp(sourceTemplateDir, tempBuildDir, { recursive: true });
 
-            sessionContext = {
-              buildId,
-              tempBuildDir,
-              lastActivity: Date.now()
-            };
-            await sessionManager.saveSessionContext(sessionId, sessionContext);
+              sessionContext = {
+                buildId,
+                tempBuildDir,
+                lastActivity: Date.now()
+              };
+              await sessionManager.saveSessionContext(sessionId, sessionContext);
+            }
           }
         }
 
@@ -754,13 +619,12 @@ export function initializeModificationRoutes(
           console.error('Context loading error:', contextError);
         }
 
-        // Initialize stateless file modifier - FIXED CONSTRUCTOR
+        // Initialize stateless file modifier
         const fileModifier = new StatelessIntelligentFileModifier(anthropic, tempBuildDir, sessionId);
         
-        // Start timing
         const startTime = Date.now();
         
-        // Process modification using stateless system
+        // Process modification
         const result = await fileModifier.processModification(
           enhancedPrompt,
           undefined,
@@ -780,7 +644,7 @@ export function initializeModificationRoutes(
         const modificationDuration = Date.now() - startTime;
 
         if (result.success) {
-          // Save modification to conversation history AND Redis
+          // Save modification to conversation history
           try {
             await conversationHelper.saveModification(sessionId, {
               prompt,
@@ -794,23 +658,9 @@ export function initializeModificationRoutes(
             console.error('Failed to save modification to history:', saveError);
           }
 
-          // BUILD & DEPLOY PIPELINE - UPDATED
+          // BUILD & DEPLOY PIPELINE
           try {
-            console.log(`[${buildId}] Starting build pipeline after successful stateless modification...`);
-            
-            // DEBUG: Check what files exist in tempBuildDir before zipping
-            console.log(`[${buildId}] DEBUG: Checking temp directory contents...`);
-            const files = await fs.promises.readdir(tempBuildDir, { recursive: true });
-            console.log(`[${buildId}] Files in temp directory:`, files.slice(0, 20));
-            
-            // Check for package.json
-            const packageJsonPath = path.join(tempBuildDir, 'package.json');
-            try {
-              const packageJson = JSON.parse(await fs.promises.readFile(packageJsonPath, 'utf8'));
-              console.log(`[${buildId}] Package.json found with dependencies:`, Object.keys(packageJson.dependencies || {}));
-            } catch {
-              console.log(`[${buildId}] ❌ No package.json found at: ${packageJsonPath}`);
-            }
+            console.log(`[${buildId}] Starting build pipeline...`);
             
             // Create zip and upload to Azure
             const zip = new AdmZip();
@@ -837,7 +687,7 @@ export function initializeModificationRoutes(
             const urls = JSON.parse(DistUrl);
             const builtZipUrl = urls.downloadUrl;
             
-            // Deploy using the new deployment method
+            // Deploy
             const previewUrl = await runBuildAndDeploy(builtZipUrl, buildId);
 
             // Update session context with new ZIP URL
@@ -849,7 +699,7 @@ export function initializeModificationRoutes(
               }
             });
 
-            // Update database project summary with new ZIP URL
+            // Update database project summary
             if (sessionContext?.projectSummary) {
               const projectSummary = await messageDB.getActiveProjectSummary();
               if (projectSummary) {
@@ -857,9 +707,25 @@ export function initializeModificationRoutes(
               }
             }
 
-            console.log(`[${buildId}] ✅ Stateless Build & Deploy completed successfully!`);
+            // SIMPLE URL SAVING BY USER ID
+            console.log(`[${buildId}] 💾 Saving deployment URLs for user ${userId}...`);
+            
+            const urlResult = await saveProjectUrlsByUserId(
+              messageDB,
+              userId,
+              buildId,
+              {
+                deploymentUrl: previewUrl as string,
+                downloadUrl: urls.downloadUrl,
+                zipUrl: zipUrl
+              },
+              sessionId,
+              prompt
+            );
 
-            // Clear cleanup timer and cleanup temp directory (keep Redis session)
+            console.log(`[${buildId}] ✅ URLs ${urlResult.action} - Project ID: ${urlResult.projectId}`);
+
+            // Cleanup
             clearTimeout(cleanupTimer);
             await cleanupTempDirectory(buildId);
             await fileModifier.cleanup();
@@ -869,23 +735,25 @@ export function initializeModificationRoutes(
             res.json({
               success: true,
               data: {
-                workflow: "stateless-modification-system-with-redis-build",
+                workflow: "simple-user-based-modification",
                 approach: result.approach || 'UNKNOWN',
                 selectedFiles: result.selectedFiles || [],
                 addedFiles: result.addedFiles || [],
                 modifiedRanges: typeof result.modifiedRanges === 'number' ? result.modifiedRanges : (result.modifiedRanges?.length || 0),
-                conversationContext: "Enhanced context with Redis-backed stateless modification history",
+                conversationContext: "Enhanced context with Redis-backed modification history",
                 reasoning: result.reasoning,
                 modificationSummary: result.modificationSummary,
                 modificationDuration: modificationDuration,
                 totalDuration: totalDuration,
                 totalFilesAffected: (result.selectedFiles?.length || 0) + (result.addedFiles?.length || 0),
-                // BUILD & DEPLOY RESULTS - UPDATED
                 previewUrl: previewUrl,
                 downloadUrl: urls.downloadUrl,
-                zipUrl: zipUrl, // New ZIP URL for future modifications
+                zipUrl: zipUrl,
                 buildId: buildId,
                 sessionId: sessionId,
+                userId: userId,
+                projectId: urlResult.projectId,
+                projectAction: urlResult.action,
                 hosting: "Azure Static Web Apps",
                 features: [
                   "Global CDN",
@@ -907,7 +775,7 @@ export function initializeModificationRoutes(
             res.json({
               success: true,
               data: {
-                workflow: "stateless-modification-system-with-redis-build-error",
+                workflow: "simple-user-based-modification-error",
                 approach: result.approach || 'UNKNOWN',
                 selectedFiles: result.selectedFiles || [],
                 addedFiles: result.addedFiles || [],
@@ -915,7 +783,8 @@ export function initializeModificationRoutes(
                 buildError: buildError instanceof Error ? buildError.message : 'Build failed',
                 buildId: buildId,
                 sessionId: sessionId,
-                message: "Stateless modification completed successfully, but build/deploy failed",
+                userId: userId,
+                message: "Modification completed successfully, but build/deploy failed",
                 projectState: sessionContext?.projectSummary ? 'existing_project_modified' : 'new_project_created'
               }
             });
@@ -942,13 +811,14 @@ export function initializeModificationRoutes(
 
           res.status(400).json({
             success: false,
-            error: result.error || 'Stateless modification failed',
+            error: result.error || 'Modification failed',
             approach: result.approach,
             reasoning: result.reasoning,
             selectedFiles: result.selectedFiles || [],
-            workflow: "stateless-modification-system-with-redis-build",
+            workflow: "simple-user-based-modification",
             buildId: buildId,
             sessionId: sessionId,
+            userId: userId,
             projectState: sessionContext?.projectSummary ? 'existing_project_failed' : 'new_project_failed'
           });
         }
@@ -962,23 +832,59 @@ export function initializeModificationRoutes(
           success: false,
           error: 'Failed to setup project environment',
           details: downloadError instanceof Error ? downloadError.message : 'Unknown error',
-          workflow: "stateless-modification-system-with-redis-build",
+          workflow: "simple-user-based-modification",
           buildId: buildId,
-          sessionId: sessionId
+          sessionId: sessionId,
+          userId: userId
         });
       }
 
     } catch (error: any) {
       const buildId = uuidv4();
       const sessionId = sessionManager.generateSessionId();
-      console.error(`[${buildId}] ❌ Stateless non-streaming modification error:`, error);
+      console.error(`[${buildId}] ❌ Non-streaming modification error:`, error);
       res.status(500).json({
         success: false,
-        error: 'Internal server error during stateless modification',
+        error: 'Internal server error during modification',
         details: error.message,
-        workflow: "stateless-modification-system-with-redis-build",
+        workflow: "simple-user-based-modification",
         buildId: buildId,
-        sessionId: sessionId
+        sessionId: sessionId,
+        userId: req.body.userId || 1
+      });
+    }
+  });
+
+  // SIMPLE ENDPOINT TO GET USER'S PROJECTS
+  router.get("/user/:userId/projects", async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { userId } = req.params;
+      const projects = await messageDB.getUserProjects(parseInt(userId));
+
+      res.json({
+        success: true,
+        data: projects.map(project => ({
+          id: project.id,
+          name: project.name,
+          description: project.description,
+          status: project.status,
+          deploymentUrl: project.deploymentUrl,
+          downloadUrl: project.downloadUrl,
+          zipUrl: project.zipUrl,
+          buildId: project.buildId,
+          framework: project.framework,
+          template: project.template,
+          messageCount: project.messageCount,
+          lastMessageAt: project.lastMessageAt,
+          createdAt: project.createdAt,
+          updatedAt: project.updatedAt
+        }))
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to get user projects',
+        details: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   });

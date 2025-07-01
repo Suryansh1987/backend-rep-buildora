@@ -49,39 +49,63 @@ export class UnrestrictedIntelligentFileModifier {
   private unrestrictedProcessor: EnhancedAtomicComponentProcessor;
 
   constructor(anthropic: Anthropic, reactBasePath: string, sessionId: string, redisUrl?: string) {
-    this.anthropic = anthropic;
-    this.reactBasePath = reactBasePath;
-    this.sessionId = sessionId;
-    this.redis = new RedisService(redisUrl);
-    
-    // Initialize original modules
-    this.scopeAnalyzer = new ScopeAnalyzer(anthropic);
-    this.componentGenerationSystem = new ComponentGenerationSystem(anthropic, reactBasePath);
-    this.dependencyManager = new DependencyManager(new Map());
-    this.fallbackMechanism = new FallbackMechanism(anthropic);
+  console.log('[DEBUG] UnrestrictedIntelligentFileModifier constructor starting...');
+  console.log(`[DEBUG] reactBasePath: ${reactBasePath}`);
+  
+  this.anthropic = anthropic;
+  this.reactBasePath = reactBasePath;
+  this.sessionId = sessionId;
+  this.redis = new RedisService(redisUrl);
+  
+  // Initialize original modules
+  this.scopeAnalyzer = new ScopeAnalyzer(anthropic);
+  this.componentGenerationSystem = new ComponentGenerationSystem(anthropic, reactBasePath);
+  this.dependencyManager = new DependencyManager(new Map());
+  this.fallbackMechanism = new FallbackMechanism(anthropic);
 
-    // Initialize existing processors
-    this.tokenTracker = new TokenTracker();
-    this.astAnalyzer = new ASTAnalyzer();
-    this.projectAnalyzer = new ProjectAnalyzer(reactBasePath);
-    
-    this.fullFileProcessor = new FullFileProcessor(
-      anthropic, 
-      this.tokenTracker
-    );
-    
-    this.targetedNodesProcessor = new TargetedNodesProcessor(
-      anthropic, 
-      this.tokenTracker, 
-      this.astAnalyzer
-    );
+  // Initialize existing processors
+  this.tokenTracker = new TokenTracker();
+  this.astAnalyzer = new ASTAnalyzer();
+  this.projectAnalyzer = new ProjectAnalyzer(reactBasePath);
+  
+  console.log('[DEBUG] About to initialize FullFileProcessor...');
+  this.fullFileProcessor = new FullFileProcessor(
+    anthropic, 
+    this.tokenTracker,
+    reactBasePath  // FIXED: Add missing basePath parameter
+  );
+  console.log('[DEBUG] FullFileProcessor initialized');
+  
+  console.log('[DEBUG] About to initialize TargetedNodesProcessor...');
+  // FIXED: Add missing reactBasePath parameter
+  this.targetedNodesProcessor = new TargetedNodesProcessor(
+    anthropic, 
+    this.tokenTracker, 
+    this.astAnalyzer,
+    reactBasePath  // ADD THIS MISSING PARAMETER
+  );
+  console.log('[DEBUG] TargetedNodesProcessor initialized with reactBasePath');
 
-    // NEW: Initialize unrestricted processor
-    this.unrestrictedProcessor = new EnhancedAtomicComponentProcessor(
-      anthropic,
-      reactBasePath
-    );
+  console.log('[DEBUG] About to initialize EnhancedAtomicComponentProcessor...');
+  this.unrestrictedProcessor = new EnhancedAtomicComponentProcessor(
+    anthropic,
+    reactBasePath
+  );
+  console.log('[DEBUG] All processors initialized');
+}
+
+// Also add a method to verify the setup
+private verifyProcessorSetup(): void {
+  console.log('[DEBUG] Verifying processor setup...');
+  console.log(`[DEBUG] this.reactBasePath: ${this.reactBasePath}`);
+  console.log(`[DEBUG] targetedNodesProcessor exists: ${!!this.targetedNodesProcessor}`);
+  
+  // Check if the processor has the right base path
+  if (this.targetedNodesProcessor && (this.targetedNodesProcessor as any).reactBasePath) {
+    console.log(`[DEBUG] targetedNodesProcessor.reactBasePath: ${(this.targetedNodesProcessor as any).reactBasePath}`);
   }
+}
+
 
   // ==============================================================
   // SESSION MANAGEMENT (simplified with error handling)
@@ -425,185 +449,265 @@ ${recentChanges.map(change => {
   }
 
   private async handleTargetedModification(prompt: string): Promise<boolean> {
+  console.log('[DEBUG] handleTargetedModification: Starting...');
+  
+  try {
+    console.log('[DEBUG] handleTargetedModification: Getting project files...');
     const projectFiles = await this.getProjectFiles();
+    console.log(`[DEBUG] handleTargetedModification: Got ${projectFiles.size} project files`);
     
-    try {
-      const processor = this.targetedNodesProcessor as any;
-      let result;
+    console.log('[DEBUG] handleTargetedModification: Getting processor reference...');
+    const processor = this.targetedNodesProcessor as any;
+    console.log('[DEBUG] handleTargetedModification: Processor type:', typeof processor);
+    console.log('[DEBUG] handleTargetedModification: Processor methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(processor)));
+    
+    let result;
+    
+    console.log('[DEBUG] handleTargetedModification: Checking for processTargetedModification method...');
+    if (processor.processTargetedModification) {
+      console.log('[DEBUG] handleTargetedModification: Calling processTargetedModification...');
+      result = await processor.processTargetedModification(
+        prompt,
+        projectFiles,
+        this.reactBasePath,
+        (message: string) => {
+          console.log('[DEBUG] TargetedProcessor Stream:', message);
+          this.streamUpdate(message);
+        }
+      );
+      console.log('[DEBUG] handleTargetedModification: processTargetedModification completed with result:', result);
       
-      if (processor.processTargetedModification) {
-        result = await processor.processTargetedModification(
-          prompt,
-          projectFiles,
-          this.reactBasePath,
-          (message: string) => this.streamUpdate(message)
-        );
-      } else if (processor.process) {
-        result = await processor.process(
-          prompt,
-          projectFiles,
-          this.reactBasePath,
-          (message: string) => this.streamUpdate(message)
-        );
-      } else if (processor.handleTargetedModification) {
-        result = await processor.handleTargetedModification(
-          prompt,
-          projectFiles,
-          this.reactBasePath,
-          (message: string) => this.streamUpdate(message)
-        );
-      } else {
-        this.streamUpdate('⚠️ No suitable method found on TargetedNodesProcessor');
-        return false;
-      }
-
-      if (result) {
-        if (result.updatedProjectFiles) {
-          await this.setProjectFiles(result.updatedProjectFiles);
-        } else if (result.projectFiles) {
-          await this.setProjectFiles(result.projectFiles);
+    } else if (processor.process) {
+      console.log('[DEBUG] handleTargetedModification: Calling process method...');
+      result = await processor.process(
+        prompt,
+        projectFiles,
+        this.reactBasePath,
+        (message: string) => {
+          console.log('[DEBUG] TargetedProcessor Stream:', message);
+          this.streamUpdate(message);
         }
-
-        if (result.changes && Array.isArray(result.changes)) {
-          for (const change of result.changes) {
-            await this.addModificationChange(
-              change.type || 'modified',
-              change.file,
-              change.description || 'File modified',
-              {
-                approach: 'TARGETED_NODES',
-                success: change.success !== false,
-                linesChanged: change.details?.linesChanged,
-                componentsAffected: change.details?.componentsAffected,
-                reasoning: change.details?.reasoning
-              }
-            );
-          }
+      );
+      console.log('[DEBUG] handleTargetedModification: process method completed with result:', result);
+      
+    } else if (processor.handleTargetedModification) {
+      console.log('[DEBUG] handleTargetedModification: Calling handleTargetedModification method...');
+      result = await processor.handleTargetedModification(
+        prompt,
+        projectFiles,
+        this.reactBasePath,
+        (message: string) => {
+          console.log('[DEBUG] TargetedProcessor Stream:', message);
+          this.streamUpdate(message);
         }
-
-        return result.success !== false;
-      }
-
-      return false;
-    } catch (error) {
-      this.streamUpdate(`❌ Targeted modification failed: ${error}`);
+      );
+      console.log('[DEBUG] handleTargetedModification: handleTargetedModification method completed with result:', result);
+      
+    } else {
+      console.log('[DEBUG] handleTargetedModification: No suitable method found');
+      this.streamUpdate('⚠️ No suitable method found on TargetedNodesProcessor');
       return false;
     }
+
+    console.log('[DEBUG] handleTargetedModification: Processing result...');
+    if (result) {
+      console.log('[DEBUG] handleTargetedModification: Result exists, checking properties...');
+      console.log('[DEBUG] handleTargetedModification: Result keys:', Object.keys(result));
+      
+      if (result.updatedProjectFiles) {
+        console.log('[DEBUG] handleTargetedModification: Updating project files with updatedProjectFiles...');
+        await this.setProjectFiles(result.updatedProjectFiles);
+      } else if (result.projectFiles) {
+        console.log('[DEBUG] handleTargetedModification: Updating project files with projectFiles...');
+        await this.setProjectFiles(result.projectFiles);
+      }
+
+      if (result.changes && Array.isArray(result.changes)) {
+        console.log(`[DEBUG] handleTargetedModification: Processing ${result.changes.length} changes...`);
+        for (const change of result.changes) {
+          console.log('[DEBUG] handleTargetedModification: Processing change:', change);
+          await this.addModificationChange(
+            change.type || 'modified',
+            change.file,
+            change.description || 'File modified',
+            {
+              approach: 'TARGETED_NODES',
+              success: change.success !== false,
+              linesChanged: change.details?.linesChanged,
+              componentsAffected: change.details?.componentsAffected,
+              reasoning: change.details?.reasoning
+            }
+          );
+        }
+      } else {
+        console.log('[DEBUG] handleTargetedModification: No changes array found in result');
+      }
+
+      const success = result.success !== false;
+      console.log(`[DEBUG] handleTargetedModification: Returning success: ${success}`);
+      return success;
+    } else {
+      console.log('[DEBUG] handleTargetedModification: No result returned from processor');
+      return false;
+    }
+
+  } catch (error) {
+    console.error('[DEBUG] handleTargetedModification: Error occurred:', error);
+    this.streamUpdate(`❌ Targeted modification failed: ${error}`);
+    return false;
   }
+}
 
   // ==============================================================
   // MAIN PROCESSING METHOD (with comprehensive error handling)
   // ==============================================================
 
   async processModification(
-    prompt: string, 
-    conversationContext?: string,
-    dbSummary?: string,
-    projectSummaryCallback?: (summary: string, prompt: string) => Promise<string | null>
-  ): Promise<ModificationResult> {
-    try {
-      this.streamUpdate('🚀 Starting UNRESTRICTED intelligent modification workflow...');
-      
-      // Initialize session (but don't fail if Redis is down)
-      await this.initializeSession();
-      
-      const projectFiles = await this.getProjectFiles();
-      
-      if (projectFiles.size === 0) {
-        this.streamUpdate('⚠️ No project files found, but proceeding with component creation...');
-      }
-
-      // Build project summary
-      const projectSummary = dbSummary || this.projectAnalyzer.buildProjectSummary(projectFiles);
-      const contextWithSummary = (conversationContext || '') + '\n\n' + await this.getModificationContextualSummary();
-      
-      // Analyze scope
-      const scope = await this.scopeAnalyzer.analyzeScope(
-        prompt, 
-        projectSummary, 
-        contextWithSummary,
-        dbSummary
-      );
-      
-      this.streamUpdate(`📋 Modification method: ${scope.scope}`);
-
-      // Prepare component generation system if needed
-      if (scope.scope === 'COMPONENT_ADDITION') {
-        try {
-          await this.componentGenerationSystem.refreshFileStructure();
-          if (dbSummary) {
-            this.componentGenerationSystem.setProjectSummary(dbSummary);
-          }
-        } catch (error) {
-          this.streamUpdate(`⚠️ Component system setup warning: ${error}`);
-          // Continue anyway
-        }
-      }
-
-      let success = false;
-      let selectedFiles: string[] = [];
-      let addedFiles: string[] = [];
-
-      // Execute based on scope
-      switch (scope.scope) {
-        case 'COMPONENT_ADDITION':
-          // Use the UNRESTRICTED component addition workflow
-          const componentResult = await this.handleComponentAddition(prompt, scope, projectSummaryCallback);
-          return componentResult;
-          
-        case 'FULL_FILE':
-          success = await this.handleFullFileModification(prompt);
-          if (success) {
-            const fullFileModifications = await this.getMostModifiedFiles();
-            selectedFiles = fullFileModifications.map(item => item.file);
-          }
-          break;
-          
-        case 'TARGETED_NODES':
-          success = await this.handleTargetedModification(prompt);
-          if (success) {
-            const targetedModifications = await this.getMostModifiedFiles();
-            selectedFiles = targetedModifications.map(item => item.file);
-          }
-          break;
-          
-        default:
-          this.streamUpdate(`⚠️ Unknown scope: ${scope.scope}, attempting component addition fallback...`);
-          const fallbackResult = await this.handleComponentAddition(prompt, scope, projectSummaryCallback);
-          return fallbackResult;
-      }
-      
-      // Return results
-      if (success) {
-        return {
-          success: true,
-          selectedFiles,
-          addedFiles,
-          approach: scope.scope,
-          reasoning: `${scope.reasoning} Enhanced AST analysis identified ${selectedFiles.length} files for modification.`,
-          modificationSummary: await this.getModificationContextualSummary(),
-          tokenUsage: this.tokenTracker.getStats()
-        };
-      } else {
-        return {
-          success: false,
-          error: 'Modification process failed',
-          selectedFiles: [],
-          addedFiles: [],
-          approach: scope.scope,
-          reasoning: scope.reasoning,
-          tokenUsage: this.tokenTracker.getStats()
-        };
-      }
-      
-    } catch (error) {
-      this.streamUpdate(`❌ Modification process failed: ${error}`);
-      
-      // Final fallback - try emergency component creation for any request
-      this.streamUpdate('🚨 Final fallback: Emergency component creation...');
-      return await this.createComponentEmergency(prompt);
+  prompt: string, 
+  conversationContext?: string,
+  dbSummary?: string,
+  projectSummaryCallback?: (summary: string, prompt: string) => Promise<string | null>
+): Promise<ModificationResult> {
+  try {
+    this.streamUpdate('🚀 Starting UNRESTRICTED intelligent modification workflow...');
+    console.log(`[DEBUG] Starting processModification with prompt: "${prompt.substring(0, 100)}..."`);
+    
+    // Verify setup
+    this.verifyProcessorSetup();
+    
+    // Initialize session (but don't fail if Redis is down)
+    this.streamUpdate('🔧 Initializing session...');
+    console.log('[DEBUG] About to call initializeSession()');
+    await this.initializeSession();
+    console.log('[DEBUG] initializeSession() completed');
+    
+    this.streamUpdate('📁 Getting project files...');
+    console.log('[DEBUG] About to call getProjectFiles()');
+    const projectFiles = await this.getProjectFiles();
+    console.log(`[DEBUG] getProjectFiles() returned ${projectFiles.size} files`);
+    
+    if (projectFiles.size === 0) {
+      this.streamUpdate('⚠️ No project files found, but proceeding with component creation...');
     }
+
+    // Build project summary
+    this.streamUpdate('📊 Building project summary...');
+    console.log('[DEBUG] About to build project summary');
+    const projectSummary = dbSummary || this.projectAnalyzer.buildProjectSummary(projectFiles);
+    console.log(`[DEBUG] Project summary length: ${projectSummary.length}`);
+    
+    const contextWithSummary = (conversationContext || '') + '\n\n' + await this.getModificationContextualSummary();
+    console.log(`[DEBUG] Context with summary length: ${contextWithSummary.length}`);
+    
+    // Analyze scope
+    this.streamUpdate('🔍 Analyzing scope...');
+    console.log('[DEBUG] About to call analyzeScope()');
+    const scope = await this.scopeAnalyzer.analyzeScope(
+      prompt, 
+      projectSummary, 
+      contextWithSummary,
+      dbSummary
+    );
+    console.log(`[DEBUG] Scope analysis completed: ${scope.scope}`);
+    
+    this.streamUpdate(`📋 Modification method: ${scope.scope}`);
+
+    // Prepare component generation system if needed
+    if (scope.scope === 'COMPONENT_ADDITION') {
+      try {
+        this.streamUpdate('🔧 Setting up component generation system...');
+        console.log('[DEBUG] About to refresh component generation system');
+        await this.componentGenerationSystem.refreshFileStructure();
+        if (dbSummary) {
+          this.componentGenerationSystem.setProjectSummary(dbSummary);
+        }
+        console.log('[DEBUG] Component generation system setup completed');
+      } catch (error) {
+        console.log(`[DEBUG] Component system setup error: ${error}`);
+        this.streamUpdate(`⚠️ Component system setup warning: ${error}`);
+        // Continue anyway
+      }
+    }
+
+    let success = false;
+    let selectedFiles: string[] = [];
+    let addedFiles: string[] = [];
+
+    // Execute based on scope
+    console.log(`[DEBUG] About to execute scope: ${scope.scope}`);
+    switch (scope.scope) {
+      case 'COMPONENT_ADDITION':
+        this.streamUpdate('🚀 Executing component addition...');
+        console.log('[DEBUG] About to call handleComponentAddition()');
+        // Use the UNRESTRICTED component addition workflow
+        const componentResult = await this.handleComponentAddition(prompt, scope, projectSummaryCallback);
+        console.log(`[DEBUG] handleComponentAddition() completed with success: ${componentResult.success}`);
+        return componentResult;
+        
+      case 'FULL_FILE':
+        this.streamUpdate('🚀 Executing full file modification...');
+        console.log('[DEBUG] About to call handleFullFileModification()');
+        success = await this.handleFullFileModification(prompt);
+        console.log(`[DEBUG] handleFullFileModification() completed with success: ${success}`);
+        if (success) {
+          const fullFileModifications = await this.getMostModifiedFiles();
+          selectedFiles = fullFileModifications.map(item => item.file);
+        }
+        break;
+        
+      case 'TARGETED_NODES':
+        this.streamUpdate('🚀 Executing targeted modification...');
+        console.log('[DEBUG] About to call handleTargetedModification()');
+        success = await this.handleTargetedModification(prompt);
+        console.log(`[DEBUG] handleTargetedModification() completed with success: ${success}`);
+        if (success) {
+          const targetedModifications = await this.getMostModifiedFiles();
+          selectedFiles = targetedModifications.map(item => item.file);
+        }
+        break;
+        
+      default:
+        this.streamUpdate(`⚠️ Unknown scope: ${scope.scope}, attempting component addition fallback...`);
+        console.log(`[DEBUG] Unknown scope: ${scope.scope}, using fallback`);
+        const fallbackResult = await this.handleComponentAddition(prompt, scope, projectSummaryCallback);
+        console.log(`[DEBUG] Fallback completed with success: ${fallbackResult.success}`);
+        return fallbackResult;
+    }
+    
+    // Return results
+    console.log(`[DEBUG] About to return results. Success: ${success}`);
+    if (success) {
+      return {
+        success: true,
+        selectedFiles,
+        addedFiles,
+        approach: scope.scope,
+        reasoning: `${scope.reasoning} Enhanced AST analysis identified ${selectedFiles.length} files for modification.`,
+        modificationSummary: await this.getModificationContextualSummary(),
+        tokenUsage: this.tokenTracker.getStats()
+      };
+    } else {
+      return {
+        success: false,
+        error: 'Modification process failed',
+        selectedFiles: [],
+        addedFiles: [],
+        approach: scope.scope,
+        reasoning: scope.reasoning,
+        tokenUsage: this.tokenTracker.getStats()
+      };
+    }
+    
+  } catch (error) {
+    console.error(`[DEBUG] processModification error:`, error);
+    this.streamUpdate(`❌ Modification process failed: ${error}`);
+    
+    // Final fallback - try emergency component creation for any request
+    this.streamUpdate('🚨 Final fallback: Emergency component creation...');
+    console.log('[DEBUG] About to try emergency component creation');
+    return await this.createComponentEmergency(prompt);
   }
+}
 
   // ==============================================================
   // UTILITY METHODS

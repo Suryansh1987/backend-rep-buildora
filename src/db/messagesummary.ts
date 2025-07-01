@@ -3,7 +3,9 @@ import { drizzle } from 'drizzle-orm/neon-http';
 import { neon } from '@neondatabase/serverless';
 import { eq, desc, sql, and, like } from 'drizzle-orm';
 import Anthropic from '@anthropic-ai/sdk';
-
+import { 
+  projects
+} from './project_schema';
 // Import component integrator specific schema
 import {
   ciMessages as messages,
@@ -70,10 +72,228 @@ export class DrizzleMessageHistoryDB {
     this.anthropic = anthropic;
   }
 
-  /**
-   * Save project summary to database with optional ZIP URL and buildId
-   * Returns the ID of the newly created summary
-   */
+  // Add these methods to your DrizzleMessageHistoryDB class
+
+
+// Add these methods to your DrizzleMessageHistoryDB class in db/Messagesummary.ts
+
+// Method to get recent projects (needed for fallback identification)
+async getRecentProjects(limit: number = 10): Promise<any[]> {
+  try {
+    return await this.db
+      .select()
+      .from(projects)
+      .orderBy(desc(projects.updatedAt))
+      .limit(limit);
+  } catch (error) {
+    console.error('Error getting recent projects:', error);
+    return [];
+  }
+}
+
+// Enhanced getUserProjects method (already exists but making sure it's correct)
+async getUserProjects(userId: number): Promise<any[]> {
+  try {
+    return await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.userId, userId))
+      .orderBy(desc(projects.updatedAt));
+  } catch (error) {
+    console.error('Error getting user projects:', error);
+    return [];
+  }
+}
+
+// Method to get all projects with their deployment URLs
+async getAllProjectsWithUrls(): Promise<any[]> {
+  try {
+    return await this.db
+      .select()
+      .from(projects)
+      .where(and(
+        eq(projects.status, 'ready'),
+        sql`${projects.deploymentUrl} IS NOT NULL`
+      ))
+      .orderBy(desc(projects.updatedAt));
+  } catch (error) {
+    console.error('Error getting projects with URLs:', error);
+    return [];
+  }
+}
+
+
+async getProjectBySessionId(sessionId: string): Promise<any> {
+  try {
+    const result = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.lastSessionId, sessionId))
+      .orderBy(desc(projects.updatedAt))
+      .limit(1);
+    
+    return result[0] || null;
+  } catch (error) {
+    console.error('Error getting project by session ID:', error);
+    return null;
+  }
+}
+
+// Method to get project by build ID
+async getProjectByBuildId(buildId: string): Promise<any> {
+  try {
+    const result = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.buildId, buildId))
+      .orderBy(desc(projects.updatedAt))
+      .limit(1);
+    
+    return result[0] || null;
+  } catch (error) {
+    console.error('Error getting project by build ID:', error);
+    return null;
+  }
+}
+
+// Method to update project URLs
+async updateProjectUrls(projectId: number, updateData: {
+  deploymentUrl: string;
+  downloadUrl: string;
+  zipUrl: string;
+  buildId: string;
+  status: string;
+  lastSessionId: string;
+  lastMessageAt: Date;
+  updatedAt: Date;
+}): Promise<void> {
+  try {
+    await this.db
+      .update(projects)
+      .set(updateData)
+      .where(eq(projects.id, projectId));
+    
+    console.log(`✅ Updated project ${projectId} with new URLs`);
+  } catch (error) {
+    console.error('Error updating project URLs:', error);
+    throw error;
+  }
+}
+
+// Method to create new project
+async createProject(projectData: {
+  userId: number;
+  name: string;
+  description: string;
+  status: string;
+  projectType: string;
+  deploymentUrl: string;
+  downloadUrl: string;
+  zipUrl: string;
+  buildId: string;
+  lastSessionId: string;
+  framework: string;
+  template: string;
+  lastMessageAt: Date;
+  messageCount: number;
+}): Promise<number> {
+  try {
+    const result = await this.db
+      .insert(projects)
+      .values({
+        ...projectData,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      })
+      .returning({ id: projects.id });
+    
+    const projectId = result[0].id;
+    console.log(`✅ Created new project ${projectId}`);
+    return projectId;
+  } catch (error) {
+    console.error('Error creating project:', error);
+    throw error;
+  }
+}
+
+
+
+// Method to get project with deployment history
+async getProjectWithHistory(projectId: number): Promise<any> {
+  try {
+    const project = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+    
+    if (!project[0]) {
+      return null;
+    }
+
+    // You could also join with messages or other related tables here
+    return {
+      ...project[0],
+      // Add any additional project history data you want
+    };
+  } catch (error) {
+    console.error('Error getting project with history:', error);
+    return null;
+  }
+}
+
+// Method to update project status
+async updateProjectStatus(projectId: number, status: string): Promise<void> {
+  try {
+    await this.db
+      .update(projects)
+      .set({ 
+        status,
+        updatedAt: new Date()
+      })
+      .where(eq(projects.id, projectId));
+  } catch (error) {
+    console.error('Error updating project status:', error);
+    throw error;
+  }
+}
+
+// Method to link session to project
+async linkSessionToProject(sessionId: string, projectId: number): Promise<void> {
+  try {
+    await this.db
+      .update(projects)
+      .set({ 
+        lastSessionId: sessionId,
+        lastMessageAt: new Date(),
+        updatedAt: new Date()
+      })
+      .where(eq(projects.id, projectId));
+  } catch (error) {
+    console.error('Error linking session to project:', error);
+    throw error;
+  }
+}
+
+// Method to increment message count for project
+async incrementProjectMessageCount(sessionId: string): Promise<void> {
+  try {
+    const project = await this.getProjectBySessionId(sessionId);
+    if (project) {
+      await this.db
+        .update(projects)
+        .set({ 
+          messageCount: project.messageCount + 1,
+          lastMessageAt: new Date(),
+          updatedAt: new Date()
+        })
+        .where(eq(projects.id, project.id));
+    }
+  } catch (error) {
+    console.error('Error incrementing project message count:', error);
+    // Don't throw - this is not critical
+  }
+}
   async saveProjectSummary(
     summary: string, 
     prompt: string, 

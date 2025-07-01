@@ -1,60 +1,24 @@
-// src/index.ts - Clean server without problematic router handling
+// src/index.ts - Main server with Redis stateless integration and organized routes
 import Anthropic from "@anthropic-ai/sdk";
 import { RedisService } from './services/Redis';
-import "dotenv/config";
+import "dotenv/config"
+import axios from 'axios';
 import express, { Request, Response } from "express";
 import path from "path";
 import { DrizzleMessageHistoryDB } from './db/messagesummary';
 import cors from "cors";
+import { exec } from "child_process";
 import * as fs from "fs";
 
 import userRoutes from "./routes/users";
 import projectRoutes from "./routes/projects"; 
 import messageRoutes from "./routes/messages";
 
-// Import route initializers if they exist, with fallbacks
-let initializeSessionRoutes: any = null;
-let initializeGenerationRoutes: any = null;
-let initializeModificationRoutes: any = null;
-let initializeConversationRoutes: any = null;
-let initializeRedisRoutes: any = null;
-let StatelessSessionManager: any = null;
-
-try {
-  const sessionModule = require("./routes/session");
-  initializeSessionRoutes = sessionModule.initializeSessionRoutes;
-  StatelessSessionManager = sessionModule.StatelessSessionManager;
-} catch (error) {
-  console.warn("Session routes not available");
-}
-
-try {
-  const generationModule = require("./routes/generation");
-  initializeGenerationRoutes = generationModule.initializeGenerationRoutes;
-} catch (error) {
-  console.warn("Generation routes not available");
-}
-
-try {
-  const modificationModule = require("./routes/modification");
-  initializeModificationRoutes = modificationModule.initializeModificationRoutes;
-} catch (error) {
-  console.warn("Modification routes not available");
-}
-
-try {
-  const conversationModule = require("./routes/conversation");
-  initializeConversationRoutes = conversationModule.initializeConversationRoutes;
-} catch (error) {
-  console.warn("Conversation routes not available");
-}
-
-try {
-  const redisModule = require("./routes/redis-stats");
-  initializeRedisRoutes = redisModule.initializeRedisRoutes;
-} catch (error) {
-  console.warn("Redis routes not available");
-}
+import { initializeSessionRoutes, StatelessSessionManager } from "./routes/session";
+import { initializeGenerationRoutes } from "./routes/generation";
+import { initializeModificationRoutes } from "./routes/modification";
+import { initializeConversationRoutes } from "./routes/conversation";
+import { initializeRedisRoutes } from "./routes/redis-stats";
 
 const anthropic = new Anthropic();
 const app = express();
@@ -62,7 +26,7 @@ const redis = new RedisService();
 
 const DATABASE_URL = process.env.DATABASE_URL!;
 const messageDB = new DrizzleMessageHistoryDB(DATABASE_URL, anthropic);
-const sessionManager = StatelessSessionManager ? new StatelessSessionManager(redis) : null;
+const sessionManager = new StatelessSessionManager(redis);
 
 app.use(cors());
 app.use(express.json());
@@ -86,15 +50,18 @@ async function initializeServices() {
     const initializeStatsCompat = async () => {
       // For backward compatibility, we'll create a default session for legacy operations
       const defaultSessionId = 'legacy-session-default';
-      if (typeof messageDB.initializeSessionStats === 'function') {
-        await messageDB.initializeSessionStats(defaultSessionId);
-      } else if (typeof (messageDB as any).initializeStats === 'function') {
-        await (messageDB as any).initializeStats();
-      }
+      await messageDB.initializeSessionStats(defaultSessionId);
       console.log('✅ Legacy session stats initialized');
     };
 
-    await initializeStatsCompat();
+    // Try the new method first, fallback to compatibility
+    if (typeof messageDB.initializeSessionStats === 'function') {
+      await initializeStatsCompat();
+    } else if (typeof (messageDB as any).initializeStats === 'function') {
+      await (messageDB as any).initializeStats();
+    } else {
+      console.warn('⚠️ No initialization method found on messageDB');
+    }
 
     const redisConnected = await redis.isConnected();
     console.log('✅ Services initialized successfully');
@@ -121,22 +88,18 @@ app.get("/", (req: Request, res: Response) => {
 });
 
 app.get("/health", (req: Request, res: Response) => {
-  const availableFeatures = [];
-  
-  if (initializeSessionRoutes) availableFeatures.push("Redis stateless sessions");
-  if (initializeGenerationRoutes) availableFeatures.push("Project generation");
-  if (initializeModificationRoutes) availableFeatures.push("File modifications");
-  if (initializeConversationRoutes) availableFeatures.push("Session-based conversations");
-  
-  // Always available features
-  availableFeatures.push("Multi-user support", "Project management", "User management");
-
   res.json({
     status: "healthy",
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV,
     version: "3.0.0-production-ready",
-    features: availableFeatures
+    features: [
+      "Redis stateless sessions",
+      "Multi-user support",
+      "Session-based conversations",
+      "Project integration",
+      "Production scaling"
+    ]
   });
 });
 
@@ -145,132 +108,173 @@ app.use("/api/users", userRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/messages", messageRoutes);
 
-// Optional advanced routes (only if modules are available)
-if (initializeSessionRoutes) {
-  app.use("/api/session", initializeSessionRoutes(redis));
-}
+// New session-aware routes
+app.use("/api/session", initializeSessionRoutes(redis));
+app.use("/api/generate", initializeGenerationRoutes(anthropic, messageDB, sessionManager));
+app.use("/api/modify", initializeModificationRoutes(anthropic, messageDB, redis, sessionManager));
+app.use("/api/conversation", initializeConversationRoutes(messageDB, redis, sessionManager));
+app.use("/api/redis", initializeRedisRoutes(redis));
 
-if (initializeGenerationRoutes) {
-  app.use("/api/generate", initializeGenerationRoutes(anthropic, messageDB, sessionManager));
-}
-
-if (initializeModificationRoutes) {
-  app.use("/api/modify", initializeModificationRoutes(anthropic, messageDB, redis, sessionManager));
-}
-
-if (initializeConversationRoutes) {
-  app.use("/api/conversation", initializeConversationRoutes(messageDB, redis, sessionManager));
-}
-
-if (initializeRedisRoutes) {
-  app.use("/api/redis", initializeRedisRoutes(redis));
-}
-
-// Legacy compatibility endpoints - simple responses
+// Legacy route redirects with proper handling
 app.post("/api/projects/generate", async (req: Request, res: Response) => {
-  console.log('🔄 Legacy /api/projects/generate endpoint called');
-  
-  if (initializeGenerationRoutes) {
-    // If generation routes are available, try to forward
-    try {
-      // Call the generation endpoint directly
-      req.url = '/api/generate';
-      req.originalUrl = '/api/generate';
-      
-      // Find the generate route and call it
-      const generateRouter = app._router;
-      if (generateRouter) {
-        // This is a safer way to handle the redirect
-        return res.redirect(307, '/api/generate');
-      }
-    } catch (error) {
-      console.error('Error forwarding to generate route:', error);
-    }
+  console.log('🔄 Redirecting legacy /api/projects/generate to /api/generate');
+  try {
+    // Forward the request to the generate route
+    const response = await axios.post(`http://localhost:${PORT}/api/generate`, req.body, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    res.json(response.data);
+  } catch (error: any) {
+    console.error('Error forwarding to /api/generate:', error.message);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
-  
-  // Fallback response
-  res.status(501).json({
-    error: 'Service unavailable',
-    message: 'Code generation service is not available. Please ensure all required modules are installed.',
-    available: false
+});
+
+// Legacy endpoints - simplified fallback responses
+app.post("/modify-with-history-stream", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /modify-with-history-stream called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/modify/stream' 
   });
 });
 
-// Simple legacy endpoint handlers
-app.post("/generateChanges", (req: Request, res: Response) => {
+app.post("/modify-with-history", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /modify-with-history called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/modify' 
+  });
+});
+
+app.post("/messages", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /messages called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/messages' 
+  });
+});
+
+app.get("/conversation-with-summary", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /conversation-with-summary called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/conversation-with-summary' 
+  });
+});
+
+app.get("/conversation-stats", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /conversation-stats called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/conversation-stats' 
+  });
+});
+
+app.get("/summaries", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /summaries called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/summaries' 
+  });
+});
+
+app.delete("/conversation", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /conversation called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/conversation' 
+  });
+});
+
+app.get("/current-summary", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /current-summary called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/current-summary' 
+  });
+});
+
+app.post("/fix-stats", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /fix-stats called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/fix-stats' 
+  });
+});
+
+app.get("/frontend-history", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /frontend-history called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/frontend-history' 
+  });
+});
+
+app.get("/project-status", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /project-status called - feature not available');
+  res.status(501).json({ 
+    error: 'Legacy endpoint', 
+    message: 'This endpoint is deprecated. Please use /api/conversation/project-status' 
+  });
+});
+
+app.get("/redis-health", (req: Request, res: Response) => {
+  console.log('🔄 Legacy /redis-health called - redirecting to /api/redis/health');
+  res.redirect('/api/redis/health');
+});
+
+// Additional legacy endpoints for backward compatibility
+app.post("/generateChanges", async (req: Request, res: Response) => {
   console.log('🔄 Legacy generateChanges endpoint called');
-  res.json({
-    content: [{
-      text: JSON.stringify({
-        files_to_modify: ["src/App.tsx"],
-        files_to_create: [],
-        reasoning: "Legacy compatibility response",
-        dependencies: [],
-        notes: "Using legacy endpoint"
-      })
-    }]
-  });
+  try {
+    // Simple fallback response for legacy compatibility
+    res.json({
+      content: [{
+        text: JSON.stringify({
+          files_to_modify: ["src/App.tsx"],
+          files_to_create: [],
+          reasoning: "Legacy compatibility response",
+          dependencies: [],
+          notes: "Using legacy endpoint"
+        })
+      }]
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Legacy endpoint error' });
+  }
 });
 
-app.post("/extractFilesToChange", (req: Request, res: Response) => {
+app.post("/extractFilesToChange", async (req: Request, res: Response) => {
   console.log('🔄 Legacy extractFilesToChange endpoint called');
-  res.json({
-    files: [
-      {
-        path: "src/App.tsx",
-        content: "// Legacy compatibility placeholder"
-      }
-    ]
-  });
-});
-
-app.post("/modify", (req: Request, res: Response) => {
-  console.log('🔄 Legacy modify endpoint called');
-  res.json({
-    content: [{
-      text: JSON.stringify([
+  try {
+    res.json({
+      files: [
         {
           path: "src/App.tsx",
-          content: "// Modified content placeholder"
+          content: "// Legacy compatibility placeholder"
         }
-      ])
-    }]
-  });
-});
-
-app.post("/write-files", (req: Request, res: Response) => {
-  console.log('🔄 Legacy write-files endpoint called');
-  res.json({ 
-    success: true, 
-    message: 'Files written successfully (legacy mode)' 
-  });
-});
-
-// Other legacy endpoints
-const legacyEndpoints = [
-  { method: 'post', path: '/modify-with-history-stream', message: 'Streaming modifications not available' },
-  { method: 'post', path: '/modify-with-history', message: 'History-based modifications not available' },
-  { method: 'post', path: '/messages', message: 'Legacy messaging not available' },
-  { method: 'get', path: '/conversation-with-summary', message: 'Conversation summaries not available' },
-  { method: 'get', path: '/conversation-stats', message: 'Conversation statistics not available' },
-  { method: 'get', path: '/summaries', message: 'Summaries not available' },
-  { method: 'delete', path: '/conversation', message: 'Conversation management not available' },
-  { method: 'get', path: '/current-summary', message: 'Current summary not available' },
-  { method: 'post', path: '/fix-stats', message: 'Stats fixing not available' },
-  { method: 'get', path: '/frontend-history', message: 'Frontend history not available' },
-  { method: 'get', path: '/project-status', message: 'Project status not available' },
-  { method: 'get', path: '/redis-health', message: 'Redis health check not available' }
-];
-
-legacyEndpoints.forEach(endpoint => {
-  (app as any)[endpoint.method](endpoint.path, (req: Request, res: Response) => {
-    console.log(`🔄 Legacy ${endpoint.path} called - ${endpoint.message}`);
-    res.status(501).json({ 
-      error: 'Feature not available', 
-      message: endpoint.message,
-      available: false
+      ]
     });
-  });
+  } catch (error) {
+    res.status(500).json({ error: 'Legacy endpoint error' });
+  }
+});
+
+app.post("/modify", async (req: Request, res: Response) => {
+  console.log('🔄 Legacy modify endpoint called, redirecting to new API');
+  req.url = '/api/modify';
+  app._router.handle(req, res);
+});
+
+app.post("/write-files", async (req: Request, res: Response) => {
+  console.log('🔄 Legacy write-files endpoint called');
+  try {
+    // For legacy compatibility, just return success
+    res.json({ success: true, message: 'Files written successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Legacy endpoint error' });
+  }
 });
 
 // Cleanup job for temporary builds
@@ -334,19 +338,19 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT} with production-ready architecture`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔧 Available features detected automatically`);
+  console.log(`📊 Redis health: http://localhost:${PORT}/api/redis/health`);
+  console.log(`🔧 Multi-user session management enabled`);
+  console.log(`🎯 Features: Session isolation, project linking, production scaling`);
   console.log('');
-  console.log('📁 Core API endpoints:');
+  console.log('📁 Available API endpoints:');
+  console.log('  🔧 /api/session/* - Session management');
+  console.log('  🎨 /api/generate - Project generation');
+  console.log('  ✏️  /api/modify/* - File modifications');
+  console.log('  💬 /api/conversation/* - Conversation management');
+  console.log('  🔴 /api/redis/* - Redis health and stats');
   console.log('  👤 /api/users/* - User management');
   console.log('  📋 /api/projects/* - Project management');
   console.log('  💌 /api/messages/* - Message management');
-  
-  if (initializeSessionRoutes) console.log('  🔧 /api/session/* - Session management');
-  if (initializeGenerationRoutes) console.log('  🎨 /api/generate - Project generation');
-  if (initializeModificationRoutes) console.log('  ✏️  /api/modify/* - File modifications');
-  if (initializeConversationRoutes) console.log('  💬 /api/conversation/* - Conversation management');
-  if (initializeRedisRoutes) console.log('  🔴 /api/redis/* - Redis health and stats');
-  
   console.log('');
   console.log('🔄 Legacy endpoints maintained for backward compatibility');
 });

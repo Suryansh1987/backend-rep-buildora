@@ -14,6 +14,7 @@ exports.ConversationHelper = exports.IntelligentFileModifierWithDrizzle = export
 const neon_http_1 = require("drizzle-orm/neon-http");
 const serverless_1 = require("@neondatabase/serverless");
 const drizzle_orm_1 = require("drizzle-orm");
+const project_schema_1 = require("./project_schema");
 // Import component integrator specific schema
 const message_schema_1 = require("./message_schema");
 // Import the modular file modifier with proper types
@@ -25,10 +26,205 @@ class DrizzleMessageHistoryDB {
         this.db = (0, neon_http_1.drizzle)(sqlConnection);
         this.anthropic = anthropic;
     }
-    /**
-     * Save project summary to database with optional ZIP URL and buildId
-     * Returns the ID of the newly created summary
-     */
+    // Add these methods to your DrizzleMessageHistoryDB class
+    // Add these methods to your DrizzleMessageHistoryDB class in db/Messagesummary.ts
+    // Method to get recent projects (needed for fallback identification)
+    getRecentProjects() {
+        return __awaiter(this, arguments, void 0, function* (limit = 10) {
+            try {
+                return yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .limit(limit);
+            }
+            catch (error) {
+                console.error('Error getting recent projects:', error);
+                return [];
+            }
+        });
+    }
+    // Enhanced getUserProjects method (already exists but making sure it's correct)
+    getUserProjects(userId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                return yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.userId, userId))
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt));
+            }
+            catch (error) {
+                console.error('Error getting user projects:', error);
+                return [];
+            }
+        });
+    }
+    // Method to get all projects with their deployment URLs
+    getAllProjectsWithUrls() {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                return yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(project_schema_1.projects.status, 'ready'), (0, drizzle_orm_1.sql) `${project_schema_1.projects.deploymentUrl} IS NOT NULL`))
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt));
+            }
+            catch (error) {
+                console.error('Error getting projects with URLs:', error);
+                return [];
+            }
+        });
+    }
+    getProjectBySessionId(sessionId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const result = yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.lastSessionId, sessionId))
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .limit(1);
+                return result[0] || null;
+            }
+            catch (error) {
+                console.error('Error getting project by session ID:', error);
+                return null;
+            }
+        });
+    }
+    // Method to get project by build ID
+    getProjectByBuildId(buildId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const result = yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.buildId, buildId))
+                    .orderBy((0, drizzle_orm_1.desc)(project_schema_1.projects.updatedAt))
+                    .limit(1);
+                return result[0] || null;
+            }
+            catch (error) {
+                console.error('Error getting project by build ID:', error);
+                return null;
+            }
+        });
+    }
+    // Method to update project URLs
+    updateProjectUrls(projectId, updateData) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                yield this.db
+                    .update(project_schema_1.projects)
+                    .set(updateData)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+                console.log(`✅ Updated project ${projectId} with new URLs`);
+            }
+            catch (error) {
+                console.error('Error updating project URLs:', error);
+                throw error;
+            }
+        });
+    }
+    // Method to create new project
+    createProject(projectData) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const result = yield this.db
+                    .insert(project_schema_1.projects)
+                    .values(Object.assign(Object.assign({}, projectData), { createdAt: new Date(), updatedAt: new Date() }))
+                    .returning({ id: project_schema_1.projects.id });
+                const projectId = result[0].id;
+                console.log(`✅ Created new project ${projectId}`);
+                return projectId;
+            }
+            catch (error) {
+                console.error('Error creating project:', error);
+                throw error;
+            }
+        });
+    }
+    // Method to get project with deployment history
+    getProjectWithHistory(projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const project = yield this.db
+                    .select()
+                    .from(project_schema_1.projects)
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId))
+                    .limit(1);
+                if (!project[0]) {
+                    return null;
+                }
+                // You could also join with messages or other related tables here
+                return Object.assign({}, project[0]);
+            }
+            catch (error) {
+                console.error('Error getting project with history:', error);
+                return null;
+            }
+        });
+    }
+    // Method to update project status
+    updateProjectStatus(projectId, status) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                yield this.db
+                    .update(project_schema_1.projects)
+                    .set({
+                    status,
+                    updatedAt: new Date()
+                })
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+            }
+            catch (error) {
+                console.error('Error updating project status:', error);
+                throw error;
+            }
+        });
+    }
+    // Method to link session to project
+    linkSessionToProject(sessionId, projectId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                yield this.db
+                    .update(project_schema_1.projects)
+                    .set({
+                    lastSessionId: sessionId,
+                    lastMessageAt: new Date(),
+                    updatedAt: new Date()
+                })
+                    .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, projectId));
+            }
+            catch (error) {
+                console.error('Error linking session to project:', error);
+                throw error;
+            }
+        });
+    }
+    // Method to increment message count for project
+    incrementProjectMessageCount(sessionId) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const project = yield this.getProjectBySessionId(sessionId);
+                if (project) {
+                    yield this.db
+                        .update(project_schema_1.projects)
+                        .set({
+                        messageCount: project.messageCount + 1,
+                        lastMessageAt: new Date(),
+                        updatedAt: new Date()
+                    })
+                        .where((0, drizzle_orm_1.eq)(project_schema_1.projects.id, project.id));
+                }
+            }
+            catch (error) {
+                console.error('Error incrementing project message count:', error);
+                // Don't throw - this is not critical
+            }
+        });
+    }
     saveProjectSummary(summary, prompt, zipUrl, buildId) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;

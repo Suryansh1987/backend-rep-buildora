@@ -2,7 +2,7 @@ import { ProjectFile } from '../filemodifier/types';
 import { RedisModificationSummary } from '../filemodifier/modification';
 import { ASTAnalyzer } from './Astanalyzer';
 import { TokenTracker } from '../../utils/TokenTracer';
-export declare class FixedTargetedNodesProcessor {
+export declare class GranularASTProcessor {
     private anthropic;
     private tokenTracker;
     private astAnalyzer;
@@ -14,19 +14,60 @@ export declare class FixedTargetedNodesProcessor {
     private streamUpdate;
     private resolveFilePath;
     /**
-     * FIXED: Only skip actual styling files, NOT component directories
+     * MAIN GRANULAR PROCESSING METHOD
      */
-    private shouldSkipFile;
+    processGranularModification(prompt: string, projectFiles: Map<string, ProjectFile>, reactBasePath: string, streamCallback: (message: string) => void): Promise<{
+        success: boolean;
+        projectFiles?: Map<string, ProjectFile>;
+        updatedProjectFiles?: Map<string, ProjectFile>;
+        changes?: Array<{
+            type: string;
+            file: string;
+            description: string;
+            success: boolean;
+            details?: {
+                linesChanged?: number;
+                nodesAnalyzed?: number;
+                nodesSelected?: number;
+                nodesModified?: number;
+                reasoning?: string;
+            };
+        }>;
+    }>;
     /**
-     * Check if file contains actual business logic (not just styling)
+     * STEP 2: Ask Claude to analyze file nodes and select which ones need changes
      */
-    private hasBusinessLogic;
+    private analyzeFileNodes;
     /**
-     * FIXED: Don't filter out UI nodes - process ALL nodes in component files
+     * STEP 4: Generate modifications for selected nodes
      */
-    private shouldProcessNode;
+    private modifySelectedNodes;
     /**
-     * Main entry point matching the expected interface
+     * STEP 5: Apply node modifications to the file
+     */
+    private applyNodeModifications;
+    /**
+     * Create AST tree representation for Claude
+     */
+    private createASTTreeRepresentation;
+    /**
+     * Get code preview for AST representation
+     */
+    private getCodePreview;
+    /**
+     * Filter to relevant files only
+     */
+    private filterRelevantFiles;
+    /**
+     * Check if file should be analyzed
+     */
+    private shouldAnalyzeFile;
+    /**
+     * Analyze file for template variables
+     */
+    private analyzeFileForTemplate;
+    /**
+     * Main method matching expected interface
      */
     processTargetedModification(prompt: string, projectFiles: Map<string, ProjectFile>, reactBasePath: string, streamCallback: (message: string) => void): Promise<{
         success: boolean;
@@ -39,7 +80,9 @@ export declare class FixedTargetedNodesProcessor {
             success: boolean;
             details?: {
                 linesChanged?: number;
-                componentsAffected?: string[];
+                nodesAnalyzed?: number;
+                nodesSelected?: number;
+                nodesModified?: number;
                 reasoning?: string;
             };
         }>;
@@ -58,18 +101,16 @@ export declare class FixedTargetedNodesProcessor {
             success: boolean;
             details?: {
                 linesChanged?: number;
-                componentsAffected?: string[];
+                nodesAnalyzed?: number;
+                nodesSelected?: number;
+                nodesModified?: number;
                 reasoning?: string;
             };
         }>;
     }>;
     /**
-     * Legacy method - now calls the main processor
+     * Legacy method
      */
     handleTargetedModification(prompt: string, projectFiles: Map<string, ProjectFile>, modificationSummary?: RedisModificationSummary | any): Promise<boolean>;
-    private modifyCodeSnippetsWithTemplate;
-    private applyModifications;
-    private analyzeFileForTemplate;
-    private generateProjectSummary;
 }
-export { FixedTargetedNodesProcessor as TargetedNodesProcessor };
+export { GranularASTProcessor as TargetedNodesProcessor };

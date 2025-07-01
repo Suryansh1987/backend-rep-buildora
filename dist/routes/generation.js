@@ -46,7 +46,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.initializeGenerationRoutes = initializeGenerationRoutes;
-// routes/generation.ts - Project generation routes with updated Azure deployment
+// routes/generation.ts - Complete file with enhanced URL management
 const express_1 = __importDefault(require("express"));
 const uuid_1 = require("uuid");
 const adm_zip_1 = __importDefault(require("adm-zip"));
@@ -55,6 +55,7 @@ const path_1 = __importDefault(require("path"));
 const azure_deploy_1 = require("../services/azure-deploy");
 const promt_1 = require("../defaults/promt");
 const newparser_1 = require("../utils/newparser");
+const url_manager_1 = require("../db/url-manager");
 const router = express_1.default.Router();
 function getFileDescription(file) {
     const content = file.content;
@@ -119,10 +120,18 @@ function cleanupTempDirectory(buildId) {
     });
 }
 function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
-    // MAIN GENERATION ENDPOINT (enhanced with Redis session support and new Azure deployment)
+    // Initialize Enhanced Project URL Manager
+    const projectUrlManager = new url_manager_1.EnhancedProjectUrlManager(messageDB);
+    // MAIN GENERATION ENDPOINT with enhanced project identification
     router.post("/", (req, res) => __awaiter(this, void 0, void 0, function* () {
         var _a, _b;
-        const { prompt, projectId } = req.body;
+        const { prompt, projectId, // Optional: Link to existing project
+        userId, // User ID from authentication
+        projectName, // Optional: Custom project name
+        framework, // Optional: Framework (default: react)
+        template, // Optional: Template (default: vite-react-ts)
+        description // Optional: Project description
+         } = req.body;
         if (!prompt) {
             res.status(400).json({
                 success: false,
@@ -131,12 +140,13 @@ function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
             return;
         }
         const buildId = (0, uuid_1.v4)();
-        const sessionId = sessionManager.generateSessionId(); // Generate stateless session
-        console.log(`[${buildId}] Starting stateless build pipeline for prompt: "${prompt.substring(0, 100)}..."`);
-        console.log(`[${buildId}] Session ID: ${sessionId}`);
+        const sessionId = sessionManager.generateSessionId();
+        console.log(`[${buildId}] Starting generation pipeline`);
+        console.log(`[${buildId}] Session: ${sessionId}, User: ${userId}, Project: ${projectId}`);
+        console.log(`[${buildId}] Prompt: "${prompt.substring(0, 100)}..."`);
         const cleanupTimer = setTimeout(() => {
             cleanupTempDirectory(buildId);
-            sessionManager.cleanup(sessionId); // Cleanup Redis session
+            sessionManager.cleanup(sessionId);
         }, 5 * 60 * 1000);
         try {
             // Save initial session context
@@ -145,7 +155,8 @@ function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
                 tempBuildDir: '',
                 lastActivity: Date.now()
             });
-            console.log('🚀 Starting frontend generation for prompt:', prompt.substring(0, 100) + '...');
+            console.log(`[${buildId}] 🚀 Starting frontend generation...`);
+            // Setup temp build directory
             const sourceTemplateDir = path_1.default.join(__dirname, "../../react-base");
             const tempBuildDir = path_1.default.join(__dirname, "../../temp-builds", buildId);
             yield fs.promises.mkdir(tempBuildDir, { recursive: true });
@@ -153,23 +164,26 @@ function initializeGenerationRoutes(anthropic, messageDB, sessionManager) {
             console.log(`[${buildId}] Template copied to temp directory`);
             // Update session with temp directory
             yield sessionManager.updateSessionContext(sessionId, { tempBuildDir });
+            // Save user message to database
             const userMessageId = yield messageDB.addMessage(prompt, 'user', {
                 promptType: 'frontend_generation',
                 requestType: 'user_prompt',
                 timestamp: new Date().toISOString(),
-                sessionId: sessionId // Track session in DB
+                sessionId: sessionId,
+                projectId: projectId,
+                userId: userId
             });
-            console.log('🔨 Generating frontend code using system prompt...');
+            console.log(`[${buildId}] 🔨 Generating frontend code using Claude...`);
             const frontendPrompt = `${prompt}
 
 Generate a React TypeScript frontend application. Focus on creating functional, modern components with good structure.`;
             const startTime = Date.now();
-            console.log('📡 Starting streaming request for frontend generation...');
+            console.log(`[${buildId}] 📡 Starting streaming request for frontend generation...`);
             const stream = yield anthropic.messages.stream({
                 model: "claude-sonnet-4-0",
                 max_tokens: 25000,
                 temperature: 0.1,
-                system: promt_1.systemPrompt, // Use imported system prompt
+                system: promt_1.systemPrompt,
                 messages: [
                     {
                         role: "user",
@@ -186,49 +200,46 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
                 accumulatedResponse += text;
                 responseLength += text.length;
                 if (responseLength % 10000 < text.length) {
-                    console.log(`📊 Received ${responseLength} characters...`);
+                    console.log(`[${buildId}] 📊 Received ${responseLength} characters...`);
                 }
             });
             const result = yield stream.finalMessage();
             const frontendEndTime = Date.now();
             const frontendProcessingTime = frontendEndTime - startTime;
-            console.log('🔍 Frontend generation completed. Total response length:', accumulatedResponse.length);
+            console.log(`[${buildId}] 🔍 Frontend generation completed. Response length: ${accumulatedResponse.length}`);
             // Parse files using the new parser
             let parsedFiles = [];
             let parseSuccess = false;
             let parseError = null;
             try {
-                console.log('🔍 Attempting to parse frontend response with new parser...');
+                console.log(`[${buildId}] 🔍 Parsing frontend response with new parser...`);
                 const parsedFrontend = (0, newparser_1.parseFrontendCode)(accumulatedResponse);
                 parsedFiles = parsedFrontend.codeFiles;
                 parseSuccess = true;
-                console.log(`✅ Successfully parsed ${parsedFiles.length} files using new parser`);
+                console.log(`[${buildId}] ✅ Successfully parsed ${parsedFiles.length} files`);
             }
             catch (error) {
                 parseError = error;
-                console.error('❌ Failed to parse files from response:', parseError);
-                // Fallback to old parsing logic if needed
+                console.error(`[${buildId}] ❌ Failed to parse files:`, parseError);
+                // Fallback parsing logic
                 try {
-                    console.log('🔧 Attempting fallback parsing...');
+                    console.log(`[${buildId}] 🔧 Attempting fallback parsing...`);
                     let jsonContent = accumulatedResponse.trim();
                     const jsonBlockMatch = jsonContent.match(/```json\s*([\s\S]*?)\s*```/);
                     if (jsonBlockMatch) {
                         jsonContent = jsonBlockMatch[1].trim();
-                        console.log('🔍 Extracted JSON from markdown code block');
                     }
                     else {
                         const jsonObjectMatch = jsonContent.match(/\{[\s\S]*\}/);
                         if (jsonObjectMatch) {
                             jsonContent = jsonObjectMatch[0];
-                            console.log('🔍 Extracted JSON object from response');
                         }
                     }
                     if (!jsonContent.endsWith('}')) {
-                        console.log('⚠️ JSON appears truncated, attempting to fix...');
+                        console.log(`[${buildId}] ⚠️ JSON appears truncated, attempting to fix...`);
                         const lastCompleteQuote = jsonContent.lastIndexOf('",');
                         if (lastCompleteQuote !== -1) {
                             jsonContent = jsonContent.substring(0, lastCompleteQuote + 1) + '\n  }\n}';
-                            console.log('🔧 Attempted to close truncated JSON');
                         }
                     }
                     const parsed = JSON.parse(jsonContent);
@@ -238,48 +249,61 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
                             content: content
                         }));
                         parseSuccess = true;
-                        console.log(`✅ Successfully parsed ${parsedFiles.length} files from codeFiles object`);
+                        console.log(`[${buildId}] ✅ Fallback parsing successful: ${parsedFiles.length} files`);
                     }
                     else if (parsed.files && Array.isArray(parsed.files)) {
                         parsedFiles = parsed.files;
                         parseSuccess = true;
-                        console.log(`✅ Successfully parsed ${parsedFiles.length} files from files array`);
+                        console.log(`[${buildId}] ✅ Fallback parsing successful: ${parsedFiles.length} files`);
                     }
                     else {
-                        throw new Error(`JSON structure not recognized. Keys found: ${Object.keys(parsed).join(', ')}`);
+                        throw new Error(`JSON structure not recognized. Keys: ${Object.keys(parsed).join(', ')}`);
                     }
                 }
                 catch (fallbackError) {
-                    console.error('❌ Fallback parsing also failed:', fallbackError);
+                    console.error(`[${buildId}] ❌ Fallback parsing also failed:`, fallbackError);
                 }
             }
             if (!parseSuccess) {
                 clearTimeout(cleanupTimer);
                 yield sessionManager.cleanup(sessionId);
+                // Save error to database
+                yield messageDB.addMessage(`Frontend generation failed: Failed to parse generated files`, 'assistant', {
+                    promptType: 'frontend_generation',
+                    requestType: 'claude_response',
+                    relatedUserMessageId: userMessageId,
+                    success: false,
+                    error: 'Parse failure',
+                    buildId: buildId,
+                    sessionId: sessionId
+                });
                 res.status(400).json({
                     success: false,
                     error: 'Failed to parse generated files',
                     details: parseError,
-                    rawResponse: accumulatedResponse.substring(0, 500) + '...'
+                    rawResponse: accumulatedResponse.substring(0, 500) + '...',
+                    buildId: buildId,
+                    sessionId: sessionId,
+                    databaseSaved: true,
+                    projectUrlsSaved: false
                 });
                 return;
             }
             // Write files to temp directory AND cache in Redis
-            console.log('💾 Writing generated files to temp build directory and caching in Redis...');
+            console.log(`[${buildId}] 💾 Writing ${parsedFiles.length} files to temp directory and caching...`);
             const fileMap = {};
             for (const file of parsedFiles) {
                 const fullPath = path_1.default.join(tempBuildDir, file.path);
                 yield fs.promises.mkdir(path_1.default.dirname(fullPath), { recursive: true });
                 yield fs.promises.writeFile(fullPath, file.content, "utf8");
-                console.log(`✅ Written to temp: ${file.path}`);
                 // Cache in Redis for potential future modifications
                 fileMap[file.path] = file.content;
             }
             // Cache all files in Redis
             yield sessionManager.cacheProjectFiles(sessionId, fileMap);
-            console.log(`📦 Cached ${Object.keys(fileMap).length} files in Redis for session: ${sessionId}`);
+            console.log(`[${buildId}] 📦 Cached ${Object.keys(fileMap).length} files in Redis`);
             // Generate project summary
-            console.log('📋 Generating project summary...');
+            console.log(`[${buildId}] 📋 Generating project summary...`);
             const fileAnalysis = parsedFiles.map(file => {
                 const content = file.content;
                 const importMatches = content.match(/^import\s+.*?from\s+['"](.*?)['"];?$/gm) || [];
@@ -324,7 +348,7 @@ Generate a React TypeScript frontend application. Focus on creating functional, 
                     : 'no exports';
                 return `${analysis.path}: ${importSummary} | ${exportSummary} | preview: ${analysis.preview}`;
             }).join('\n');
-            const summaryPrompt = `Based on these actual generated files with their imports/exports, create a concise project summary:
+            const summaryPrompt = `Based on these generated files, create a concise project summary:
 
 GENERATED FILES ANALYSIS:
 ${filesList}
@@ -333,12 +357,11 @@ Create a summary in this format:
 
 **Project:** [Type based on file names and content]
 **Files created:**
-- src/App.tsx: {actual imports/exports found} [brief description]
-- src/pages/[PageName].tsx: {actual imports/exports found} [brief description]  
-- src/components/[ComponentName].tsx: {actual imports/exports found} [brief description]
-- src/types/index.ts: {actual imports/exports found} [brief description]
+- src/App.tsx: {actual imports/exports} [description]
+- src/pages/[PageName].tsx: {actual imports/exports} [description]  
+- src/components/[ComponentName].tsx: {actual imports/exports} [description]
 
-Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.`;
+Use the ACTUAL imports and exports provided. Keep under 1000 characters.`;
             let projectSummary = '';
             try {
                 const summaryStartTime = Date.now();
@@ -346,7 +369,7 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                     model: "claude-3-5-sonnet-20240620",
                     max_tokens: 800,
                     temperature: 0.2,
-                    system: "You are a frontend developer creating concise summaries of generated React projects. Focus on what was actually created.",
+                    system: "You are a frontend developer creating concise summaries of generated React projects.",
                     messages: [
                         {
                             role: "user",
@@ -360,22 +383,21 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                 const summaryBlocks = summaryResult.content.filter((block) => block.type === "text");
                 projectSummary = summaryBlocks.map(block => block.text).join('\n');
                 const summaryEndTime = Date.now();
-                const summaryProcessingTime = summaryEndTime - summaryStartTime;
-                console.log('📋 Project Summary Generated:', projectSummary);
-                console.log(`⏱️  Summary generation completed in ${summaryProcessingTime}ms`);
+                console.log(`[${buildId}] 📋 Project summary generated in ${summaryEndTime - summaryStartTime}ms`);
             }
             catch (summaryError) {
-                console.error('⚠️ Error generating summary:', summaryError);
+                console.error(`[${buildId}] ⚠️ Error generating summary:`, summaryError);
                 projectSummary = `Frontend project with ${parsedFiles.length} files: ${parsedFiles.map(f => f.path).join(', ')}`;
             }
+            // BUILD & DEPLOY PIPELINE
+            console.log(`[${buildId}] 🏗️ Starting build & deploy pipeline...`);
             // Create zip and upload to Azure
-            console.log(`[${buildId}] Creating zip and uploading to Azure...`);
             const zip = new adm_zip_1.default();
             zip.addLocalFolder(tempBuildDir);
             const zipBuffer = zip.toBuffer();
             const zipBlobName = `${buildId}/source.zip`;
             const zipUrl = yield (0, azure_deploy_1.uploadToAzureBlob)(process.env.AZURE_STORAGE_CONNECTION_STRING, "source-zips", zipBlobName, zipBuffer);
-            console.log(zipUrl, "this is the url that is sent for deployment");
+            console.log(`[${buildId}] ✅ Source uploaded to Azure: ${zipUrl}`);
             // Update session context with project summary and zipUrl
             yield sessionManager.updateSessionContext(sessionId, {
                 projectSummary: {
@@ -385,7 +407,7 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                 }
             });
             // Trigger Azure Container Job
-            console.log(`[${buildId}] Triggering Azure Container Job...`);
+            console.log(`[${buildId}] 🔧 Triggering Azure Container Job...`);
             const DistUrl = yield (0, azure_deploy_1.triggerAzureContainerJob)(zipUrl, buildId, {
                 resourceGroup: process.env.AZURE_RESOURCE_GROUP,
                 containerAppEnv: process.env.AZURE_CONTAINER_APP_ENV,
@@ -394,18 +416,34 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                 storageAccountName: process.env.AZURE_STORAGE_ACCOUNT_NAME,
             });
             const urls = JSON.parse(DistUrl);
-            console.log(urls, "build urls");
             const builtZipUrl = urls.downloadUrl;
             // Deploy using the new deployment method
-            console.log(`[${buildId}] Deploying with new Azure method...`);
+            console.log(`[${buildId}] 🚀 Deploying with Azure Static Web Apps...`);
             const previewUrl = yield (0, azure_deploy_1.runBuildAndDeploy)(builtZipUrl, buildId);
-            // Save project summary with ZIP URL to database
+            // ENHANCED URL SAVING TO PROJECTS TABLE
+            console.log(`[${buildId}] 💾 Saving deployment URLs with enhanced identification...`);
+            const urlResult = yield projectUrlManager.saveOrUpdateProjectUrls(sessionId, buildId, {
+                deploymentUrl: previewUrl,
+                downloadUrl: urls.downloadUrl,
+                zipUrl: zipUrl
+            }, {
+                projectId: projectId, // Optional project linking
+                userId: userId, // User ID from auth
+                isModification: false, // This is new generation
+                prompt: prompt,
+                name: projectName || undefined,
+                description: description || projectSummary,
+                framework: framework || 'react',
+                template: template || 'vite-react-ts'
+            });
+            console.log(`[${buildId}] ✅ Project URLs ${urlResult.action} - Project ID: ${urlResult.projectId}`);
+            // Save project summary to database (for backwards compatibility)
             try {
                 const summaryId = yield messageDB.saveProjectSummary(projectSummary, prompt, zipUrl, buildId);
-                console.log('💾 Saved project summary with ZIP URL to database, ID:', summaryId);
+                console.log(`[${buildId}] 💾 Saved project summary to database, ID: ${summaryId}`);
             }
             catch (summaryError) {
-                console.error('⚠️ Error saving project summary to database:', summaryError);
+                console.error(`[${buildId}] ⚠️ Error saving project summary:`, summaryError);
             }
             // Save assistant response to conversation history
             try {
@@ -424,23 +462,23 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                     previewUrl: previewUrl,
                     downloadUrl: urls.downloadUrl,
                     zipUrl: zipUrl,
-                    sessionId: sessionId // Track session
+                    sessionId: sessionId,
+                    projectId: urlResult.projectId
                 };
                 const assistantMessageId = yield messageDB.addMessage(`Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => f.path).join('\n')}`, 'assistant', assistantMetadata);
-                console.log(`💾 Saved assistant response (ID: ${assistantMessageId}) with session: ${sessionId}`);
+                console.log(`[${buildId}] 💾 Saved assistant response (ID: ${assistantMessageId})`);
             }
             catch (dbError) {
-                console.warn('⚠️ Failed to save assistant response to DB:', dbError);
+                console.warn(`[${buildId}] ⚠️ Failed to save assistant response:`, dbError);
             }
-            if (projectId) {
-                console.log(`📝 Updating project ${projectId} with new deployment URL`);
-            }
+            // Cleanup
             clearTimeout(cleanupTimer);
             yield cleanupTempDirectory(buildId);
             // Keep Redis session for potential modifications (will auto-expire)
             const totalProcessingTime = Date.now() - startTime;
-            console.log(`⏱️  Total generation + build + deploy completed in ${totalProcessingTime}ms`);
-            console.log(`📊 Token usage: ${((_a = result.usage) === null || _a === void 0 ? void 0 : _a.input_tokens) || 0} input, ${((_b = result.usage) === null || _b === void 0 ? void 0 : _b.output_tokens) || 0} output`);
+            console.log(`[${buildId}] ⏱️ Total generation completed in ${totalProcessingTime}ms`);
+            console.log(`[${buildId}] 📊 Token usage: ${((_a = result.usage) === null || _a === void 0 ? void 0 : _a.input_tokens) || 0} input, ${((_b = result.usage) === null || _b === void 0 ? void 0 : _b.output_tokens) || 0} output`);
+            // SUCCESS RESPONSE
             res.json({
                 success: true,
                 files: parsedFiles,
@@ -448,7 +486,9 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                 downloadUrl: urls.downloadUrl,
                 zipUrl: zipUrl,
                 buildId: buildId,
-                sessionId: sessionId, // Return session ID for future modifications
+                sessionId: sessionId,
+                projectId: urlResult.projectId, // NEW: Return created/updated project ID
+                projectAction: urlResult.action, // NEW: 'created' or 'updated'
                 hosting: "Azure Static Web Apps",
                 features: [
                     "Global CDN",
@@ -462,16 +502,27 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                     tokenUsage: result.usage,
                     filesGenerated: parsedFiles.length,
                     summary: projectSummary,
-                    generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`
+                    generatedFilesSummary: `Generated ${parsedFiles.length} files:\n\n${parsedFiles.map(f => `📁 ${f.path}: ${getFileDescription(f)}`).join('\n')}`,
+                    databaseSaved: true,
+                    projectUrlsSaved: true,
+                    identificationStrategy: urlResult.action === 'created' ? 'new_project_creation' : 'project_update',
+                    userProvided: {
+                        userId: userId,
+                        projectName: projectName,
+                        framework: framework,
+                        template: template,
+                        description: description
+                    }
                 }
             });
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.error(`[${buildId}] Complete build pipeline failed:`, errorMessage);
+            console.error(`[${buildId}] ❌ Complete build pipeline failed:`, errorMessage);
             clearTimeout(cleanupTimer);
             yield cleanupTempDirectory(buildId);
-            yield sessionManager.cleanup(sessionId); // Cleanup Redis session on error
+            yield sessionManager.cleanup(sessionId);
+            // Save error to database
             try {
                 const errorMetadata = {
                     promptType: 'frontend_generation',
@@ -485,14 +536,19 @@ Use the ACTUAL imports and exports I provided above. Keep under 1000 characters.
                 yield messageDB.addMessage(`Frontend generation and build failed: ${errorMessage}`, 'assistant', errorMetadata);
             }
             catch (dbError) {
-                console.warn('⚠️ Failed to save error to DB:', dbError);
+                console.warn(`[${buildId}] ⚠️ Failed to save error to DB:`, dbError);
             }
+            // ERROR RESPONSE
             res.status(500).json({
                 success: false,
                 error: 'Build process failed',
                 details: errorMessage,
                 buildId: buildId,
-                sessionId: sessionId
+                sessionId: sessionId,
+                databaseSaved: true,
+                projectUrlsSaved: false,
+                projectId: null,
+                projectAction: 'failed'
             });
         }
     }));

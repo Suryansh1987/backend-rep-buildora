@@ -154,6 +154,7 @@ ${heuristicResult ? `**HEURISTIC ANALYSIS:**\nSuggested: ${heuristicResult.sugge
 - Clear, focused modifications to identifiable elementsf
 - Requests with words like "the button", "this text", "that color"
 -add a floating button
+-chat something to something mainly text
 -Use Arial font for all headings
 -Make the title bigger
 -change the image 

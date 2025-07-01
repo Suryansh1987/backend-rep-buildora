@@ -39,10 +39,41 @@ export declare class DrizzleMessageHistoryDB {
     private anthropic;
     private defaultSessionId;
     constructor(databaseUrl: string, anthropic: Anthropic);
-    /**
-     * Save project summary to database with optional ZIP URL and buildId
-     * Returns the ID of the newly created summary
-     */
+    getRecentProjects(limit?: number): Promise<any[]>;
+    getUserProjects(userId: number): Promise<any[]>;
+    getAllProjectsWithUrls(): Promise<any[]>;
+    getProjectBySessionId(sessionId: string): Promise<any>;
+    getProjectByBuildId(buildId: string): Promise<any>;
+    updateProjectUrls(projectId: number, updateData: {
+        deploymentUrl: string;
+        downloadUrl: string;
+        zipUrl: string;
+        buildId: string;
+        status: string;
+        lastSessionId: string;
+        lastMessageAt: Date;
+        updatedAt: Date;
+    }): Promise<void>;
+    createProject(projectData: {
+        userId: number;
+        name: string;
+        description: string;
+        status: string;
+        projectType: string;
+        deploymentUrl: string;
+        downloadUrl: string;
+        zipUrl: string;
+        buildId: string;
+        lastSessionId: string;
+        framework: string;
+        template: string;
+        lastMessageAt: Date;
+        messageCount: number;
+    }): Promise<number>;
+    getProjectWithHistory(projectId: number): Promise<any>;
+    updateProjectStatus(projectId: number, status: string): Promise<void>;
+    linkSessionToProject(sessionId: string, projectId: number): Promise<void>;
+    incrementProjectMessageCount(sessionId: string): Promise<void>;
     saveProjectSummary(summary: string, prompt: string, zipUrl?: string, buildId?: string): Promise<string | null>;
     /**
      * Update existing project summary with new ZIP URL and buildId

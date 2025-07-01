@@ -17,6 +17,7 @@ export declare class UnrestrictedIntelligentFileModifier {
     private tokenTracker;
     private unrestrictedProcessor;
     constructor(anthropic: Anthropic, reactBasePath: string, sessionId: string, redisUrl?: string);
+    private verifyProcessorSetup;
     initializeSession(): Promise<void>;
     clearSession(): Promise<void>;
     private getProjectFiles;
