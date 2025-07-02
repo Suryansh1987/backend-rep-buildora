@@ -110,7 +110,7 @@ async function resolveProjectByDeployedUrl(
   deployedUrl?: string,
   sessionId?: string,
   projectId?: number
-): Promise<{ projectId: number | null; project: any | null; matchReason: string }> {
+): Promise<{ projectId: number | null; project: any | null; matchReason: string  | null}> {
   try {
     // Extract project ID from URL if not provided
     let targetProjectId: number | null | undefined = projectId;
@@ -218,15 +218,13 @@ if (!targetProjectId && deployedUrl) {
       }
     }
 
-    // Priority 5: Use most recent project as last resort
-    const recentProject = userProjects[0];
-    console.log(`⚠️ No matches found, using most recent project: ${recentProject.name}`);
     
-    return {
-      projectId: recentProject.id,
-      project: recentProject,
-      matchReason: 'recent_fallback'
-    };
+  return {
+  projectId: null,
+  project: null,
+  matchReason: null
+};
+
 
   } catch (error) {
     console.error('❌ Failed to resolve project by URL:', error);
@@ -239,43 +237,74 @@ if (!targetProjectId && deployedUrl) {
 }
 
 // FALLBACK USER RESOLUTION FUNCTION
+// UPDATED USER RESOLUTION FUNCTION - No fallbacks to existing users
 async function resolveUserId(
   messageDB: DrizzleMessageHistoryDB,
   providedUserId?: number,
   sessionId?: string
 ): Promise<number> {
   try {
-    // Priority 1: Use provided userId if valid
-    if (providedUserId && await messageDB.validateUserExists(providedUserId)) {
-      return providedUserId;
+    // Priority 1: Use provided userId if valid (MOST IMPORTANT)
+    if (providedUserId) {
+      console.log(`🔍 Checking provided userId: ${providedUserId}`);
+      
+      // Try to validate if user exists, if not create them
+      const userExists = await messageDB.validateUserExists(providedUserId);
+      if (userExists) {
+        console.log(`✅ Using existing provided userId: ${providedUserId}`);
+        return providedUserId;
+      } else {
+        // Create the user with the provided ID
+        console.log(`🆔 Creating new user with provided ID: ${providedUserId}`);
+        await messageDB.ensureUserExists(providedUserId, {
+          email: `user${providedUserId}@buildora.dev`,
+          name: `User ${providedUserId}`
+        });
+        console.log(`✅ Created user with provided ID: ${providedUserId}`);
+        return providedUserId;
+      }
     }
 
-    // Priority 2: Get userId from session's most recent project
-    if (sessionId) {
+    // Priority 2: Get userId from session's most recent project (only if no providedUserId)
+    if (sessionId && !providedUserId) {
+      console.log(`🔍 No userId provided, checking session: ${sessionId}`);
       const sessionProject = await messageDB.getProjectBySessionId(sessionId);
       if (sessionProject && sessionProject.userId) {
+        console.log(`✅ Using userId from session: ${sessionProject.userId}`);
         return sessionProject.userId;
       }
     }
 
-    // Priority 3: Get most recent user from any project
-    const mostRecentUserId = await messageDB.getMostRecentUserId();
-    if (mostRecentUserId && await messageDB.validateUserExists(mostRecentUserId)) {
-      return mostRecentUserId;
-    }
-
-    // Priority 4: Create a new user with current timestamp
-    const newUserId = Date.now() % 1000000;
+    // Priority 3: Create a completely new user (removed fallback to existing users)
+    console.log(`🆔 No valid userId found, creating new unique user...`);
+    const timestamp = Date.now();
+    const random = Math.floor(Math.random() * 1000);
+    const newUserId = timestamp + random;
+    
     await messageDB.ensureUserExists(newUserId, {
       email: `user${newUserId}@buildora.dev`,
       name: `User ${newUserId}`
     });
     
-    console.log(`✅ Created new user ${newUserId} as fallback`);
+    console.log(`✅ Created completely new user: ${newUserId}`);
     return newUserId;
+    
   } catch (error) {
     console.error('❌ Failed to resolve user ID:', error);
-    throw new Error('Could not resolve or create user');
+    
+    // Last resort: create a user with current timestamp + random
+    const emergencyUserId = Date.now() + Math.floor(Math.random() * 10000);
+    try {
+      await messageDB.ensureUserExists(emergencyUserId, {
+        email: `emergency${emergencyUserId}@buildora.dev`,
+        name: `Emergency User ${emergencyUserId}`
+      });
+      console.log(`🚨 Created emergency user: ${emergencyUserId}`);
+      return emergencyUserId;
+    } catch (emergencyError) {
+      console.error('❌ Even emergency user creation failed:', emergencyError);
+      throw new Error('Could not resolve or create user');
+    }
   }
 }
 

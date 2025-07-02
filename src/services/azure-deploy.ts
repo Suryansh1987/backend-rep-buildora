@@ -305,24 +305,31 @@ export async function runBuildAndDeploy(zipUrl: string, buildId: string) {
     zip.extractAllTo(extractDir, true);
 
     // Add vercel.json configuration
-    const vercelConfig = {
-      outputDirectory: ".",
+   const vercelConfig = {
+  outputDirectory: ".",
+  headers: [
+    {
+      source: "/(.*)",
       headers: [
         {
-          source: "/(.*)",
-          headers: [
-            {
-              key: "X-Frame-Options",
-              value: "ALLOWALL",
-            },
-            {
-              key: "Content-Security-Policy",
-              value: "frame-ancestors *;",
-            },
-          ],
+          key: "X-Frame-Options",
+          value: "ALLOWALL",
+        },
+        {
+          key: "Content-Security-Policy",
+          value: "frame-ancestors *;",
         },
       ],
-    };
+    },
+  ],
+  rewrites: [
+    {
+      source: "/(.*)",
+      destination: "/index.html",
+    },
+  ],
+};
+
     await fs.promises.writeFile(
       path.join(extractDir, "vercel.json"),
       JSON.stringify(vercelConfig, null, 2)

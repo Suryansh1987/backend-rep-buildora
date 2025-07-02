@@ -239,13 +239,10 @@ function resolveProjectByDeployedUrl(messageDB, urlManager, userId, deployedUrl,
                     };
                 }
             }
-            // Priority 5: Use most recent project as last resort
-            const recentProject = userProjects[0];
-            console.log(`⚠️ No matches found, using most recent project: ${recentProject.name}`);
             return {
-                projectId: recentProject.id,
-                project: recentProject,
-                matchReason: 'recent_fallback'
+                projectId: null,
+                project: null,
+                matchReason: null
             };
         }
         catch (error) {
@@ -259,37 +256,67 @@ function resolveProjectByDeployedUrl(messageDB, urlManager, userId, deployedUrl,
     });
 }
 // FALLBACK USER RESOLUTION FUNCTION
+// UPDATED USER RESOLUTION FUNCTION - No fallbacks to existing users
 function resolveUserId(messageDB, providedUserId, sessionId) {
     return __awaiter(this, void 0, void 0, function* () {
         try {
-            // Priority 1: Use provided userId if valid
-            if (providedUserId && (yield messageDB.validateUserExists(providedUserId))) {
-                return providedUserId;
+            // Priority 1: Use provided userId if valid (MOST IMPORTANT)
+            if (providedUserId) {
+                console.log(`🔍 Checking provided userId: ${providedUserId}`);
+                // Try to validate if user exists, if not create them
+                const userExists = yield messageDB.validateUserExists(providedUserId);
+                if (userExists) {
+                    console.log(`✅ Using existing provided userId: ${providedUserId}`);
+                    return providedUserId;
+                }
+                else {
+                    // Create the user with the provided ID
+                    console.log(`🆔 Creating new user with provided ID: ${providedUserId}`);
+                    yield messageDB.ensureUserExists(providedUserId, {
+                        email: `user${providedUserId}@buildora.dev`,
+                        name: `User ${providedUserId}`
+                    });
+                    console.log(`✅ Created user with provided ID: ${providedUserId}`);
+                    return providedUserId;
+                }
             }
-            // Priority 2: Get userId from session's most recent project
-            if (sessionId) {
+            // Priority 2: Get userId from session's most recent project (only if no providedUserId)
+            if (sessionId && !providedUserId) {
+                console.log(`🔍 No userId provided, checking session: ${sessionId}`);
                 const sessionProject = yield messageDB.getProjectBySessionId(sessionId);
                 if (sessionProject && sessionProject.userId) {
+                    console.log(`✅ Using userId from session: ${sessionProject.userId}`);
                     return sessionProject.userId;
                 }
             }
-            // Priority 3: Get most recent user from any project
-            const mostRecentUserId = yield messageDB.getMostRecentUserId();
-            if (mostRecentUserId && (yield messageDB.validateUserExists(mostRecentUserId))) {
-                return mostRecentUserId;
-            }
-            // Priority 4: Create a new user with current timestamp
-            const newUserId = Date.now() % 1000000;
+            // Priority 3: Create a completely new user (removed fallback to existing users)
+            console.log(`🆔 No valid userId found, creating new unique user...`);
+            const timestamp = Date.now();
+            const random = Math.floor(Math.random() * 1000);
+            const newUserId = timestamp + random;
             yield messageDB.ensureUserExists(newUserId, {
                 email: `user${newUserId}@buildora.dev`,
                 name: `User ${newUserId}`
             });
-            console.log(`✅ Created new user ${newUserId} as fallback`);
+            console.log(`✅ Created completely new user: ${newUserId}`);
             return newUserId;
         }
         catch (error) {
             console.error('❌ Failed to resolve user ID:', error);
-            throw new Error('Could not resolve or create user');
+            // Last resort: create a user with current timestamp + random
+            const emergencyUserId = Date.now() + Math.floor(Math.random() * 10000);
+            try {
+                yield messageDB.ensureUserExists(emergencyUserId, {
+                    email: `emergency${emergencyUserId}@buildora.dev`,
+                    name: `Emergency User ${emergencyUserId}`
+                });
+                console.log(`🚨 Created emergency user: ${emergencyUserId}`);
+                return emergencyUserId;
+            }
+            catch (emergencyError) {
+                console.error('❌ Even emergency user creation failed:', emergencyError);
+                throw new Error('Could not resolve or create user');
+            }
         }
     });
 }

@@ -302,6 +302,12 @@ function runBuildAndDeploy(zipUrl, buildId) {
                         ],
                     },
                 ],
+                rewrites: [
+                    {
+                        source: "/(.*)",
+                        destination: "/index.html",
+                    },
+                ],
             };
             yield fs.promises.writeFile(path_1.default.join(extractDir, "vercel.json"), JSON.stringify(vercelConfig, null, 2));
             console.log("✅ Added vercel.json configuration");
