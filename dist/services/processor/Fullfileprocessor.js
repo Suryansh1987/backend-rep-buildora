@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.FullFileProcessor = void 0;
 const path_1 = require("path");
 const fs_1 = require("fs");
+const template_1 = require("../filemodifier/template");
 // ============================================================================
 // UPGRADED PATH MANAGER (Inspired by FixedPathManager)
 // ============================================================================
@@ -431,6 +432,7 @@ Continue for all files. Be sure to include the FILE comment for each..
                     max_tokens: 8000,
                     temperature: 0.1,
                     messages: [{ role: 'user', content: modificationPrompt }],
+                    system: template_1.fullFilePrompt
                 });
                 const responseText = ((_b = response.content[0]) === null || _b === void 0 ? void 0 : _b.text) || '';
                 return this.extractModifiedFiles(responseText, relevantFiles);

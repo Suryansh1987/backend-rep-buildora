@@ -71,6 +71,7 @@ Copy every single existing import character-for-character, including:
 - Maintain responsive breakpoints (sm:, md:, lg:, xl:)
 - Preserve accessibility classes and ARIA attributes
 - Keep existing functionality and event handlers
+-layout changes try to generate new layout under these constraints
 
 **For Theme Changes:**
 - Update gradient backgrounds with new color schemes

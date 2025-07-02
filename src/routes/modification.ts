@@ -108,10 +108,16 @@ async function resolveProjectByDeployedUrl(
   urlManager: EnhancedProjectUrlManager,
   userId: number,
   deployedUrl?: string,
-  sessionId?: string
+  sessionId?: string,
+  projectId?: number
 ): Promise<{ projectId: number | null; project: any | null; matchReason: string }> {
   try {
-    // Get all user projects
+    // Extract project ID from URL if not provided
+    let targetProjectId: number | null | undefined = projectId;
+if (!targetProjectId && deployedUrl) {
+  targetProjectId = extractProjectIdFromUrl(deployedUrl);
+  console.log(`📎 Extracted projectId from URL: ${targetProjectId}`);
+}
     const userProjects = await messageDB.getUserProjects(userId);
     
     if (userProjects.length === 0) {
@@ -122,11 +128,40 @@ async function resolveProjectByDeployedUrl(
       };
     }
 
-    // Priority 1: Match by deployed URL (most reliable)
-    if (deployedUrl) {
-      console.log(`🔍 Looking for project with deployed URL: ${deployedUrl}`);
+    // 🎯 NEW Priority 1: If projectId is provided, verify it matches the deployedUrl
+    if (projectId && deployedUrl) {
+      console.log(`🎯 Checking if provided projectId (${projectId}) matches deployedUrl (${deployedUrl})`);
       
-      // Clean and normalize URLs for comparison
+      const specificProject = userProjects.find(p => p.id === projectId);
+      if (specificProject) {
+        if (specificProject.deploymentUrl) {
+          const normalizedTargetUrl = normalizeUrl(deployedUrl);
+          const normalizedProjectUrl = normalizeUrl(specificProject.deploymentUrl);
+          
+          if (normalizedProjectUrl === normalizedTargetUrl) {
+            console.log(`✅ Perfect match! ProjectId ${projectId} matches deployedUrl`);
+            return {
+              projectId: specificProject.id,
+              project: specificProject,
+              matchReason: 'deployed_url_match'
+            };
+          } else {
+            console.log(`⚠️ ProjectId ${projectId} exists but URL doesn't match:`);
+            console.log(`  Expected: ${normalizedTargetUrl}`);
+            console.log(`  Actual: ${normalizedProjectUrl}`);
+          }
+        } else {
+          console.log(`⚠️ ProjectId ${projectId} exists but has no deployment URL`);
+        }
+      } else {
+        console.log(`⚠️ ProjectId ${projectId} not found in user's projects`);
+      }
+    }
+
+    // Priority 2: Match by deployed URL only (existing logic)
+    if (deployedUrl) {
+      console.log(`🔍 Looking for any project with deployed URL: ${deployedUrl}`);
+      
       const normalizedTargetUrl = normalizeUrl(deployedUrl);
       
       const urlMatch = userProjects.find(project => {
@@ -157,7 +192,20 @@ async function resolveProjectByDeployedUrl(
       }
     }
 
-    // Priority 2: Try session-based matching as fallback
+    // Priority 3: If only projectId provided (no URL matching needed)
+    if (projectId) {
+      const specificProject = userProjects.find(p => p.id === projectId);
+      if (specificProject) {
+        console.log(`✅ Using provided projectId ${projectId} without URL verification`);
+        return {
+          projectId: specificProject.id,
+          project: specificProject,
+          matchReason: 'project_id_fallback'
+        };
+      }
+    }
+
+    // Priority 4: Try session-based matching as fallback
     if (sessionId) {
       const sessionProject = await messageDB.getProjectBySessionId(sessionId);
       if (sessionProject && userProjects.find(p => p.id === sessionProject.id)) {
@@ -170,9 +218,9 @@ async function resolveProjectByDeployedUrl(
       }
     }
 
-    // Priority 3: Use most recent project as last resort
+    // Priority 5: Use most recent project as last resort
     const recentProject = userProjects[0];
-    console.log(`⚠️ No URL match found, using most recent project: ${recentProject.name}`);
+    console.log(`⚠️ No matches found, using most recent project: ${recentProject.name}`);
     
     return {
       projectId: recentProject.id,
@@ -298,6 +346,15 @@ async function findProjectByUrl(
     return null;
   }
 }
+function extractProjectIdFromUrl(url: string): number | null {
+  try {
+    // Example: https://myapp.com/project/123/dashboard
+    const match = url.match(/\/project\/(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
 
 // Initialize routes with dependencies
 export function initializeModificationRoutes(
@@ -317,7 +374,8 @@ export function initializeModificationRoutes(
       sessionId: clientSessionId,
       userId: providedUserId,
       currentUrl,    // NEW: Current page URL
-      deployedUrl    // NEW: Deployed app URL
+      deployedUrl,
+      projectId: requestedProjectId     // NEW: Deployed app URL
     } = req.body;
     
     if (!prompt) {
@@ -375,19 +433,20 @@ export function initializeModificationRoutes(
       sendEvent('progress', { step: 1, total: 16, message: 'Initializing modification system...', buildId, sessionId, userId });
 
       // ENHANCED PROJECT RESOLUTION BY DEPLOYED URL
-      const { projectId: currentProjectId, project: currentProject, matchReason } = await resolveProjectByDeployedUrl(
+      const { projectId: projectId, project: currentProject, matchReason } = await resolveProjectByDeployedUrl(
         messageDB, 
         urlManager, 
         userId, 
         deployedUrl || currentUrl,
-        sessionId
+        sessionId,
+        requestedProjectId || undefined
       );
 
       console.log(`[${buildId}] Project resolution result: ${matchReason}`);
       console.log(`[${buildId}] Target URL: ${deployedUrl || currentUrl || 'none provided'}`);
 
-      if (currentProjectId) {
-        console.log(`[${buildId}] ✅ Selected project: "${currentProject.name}" (ID: ${currentProjectId})`);
+      if (projectId) {
+        console.log(`[${buildId}] ✅ Selected project: "${currentProject.name}" (ID: ${projectId})`);
         console.log(`[${buildId}] Project URL: ${currentProject.deploymentUrl}`);
       } else {
         console.log(`[${buildId}] ⚠️ No existing project matched, will create new one`);
@@ -401,7 +460,7 @@ export function initializeModificationRoutes(
           message: `✅ Found project: "${currentProject.name}" (URL match)`,
           buildId, 
           sessionId,
-          projectId: currentProjectId,
+          projectId: projectId,
           projectName: currentProject.name,
           matchReason
         });
@@ -412,7 +471,7 @@ export function initializeModificationRoutes(
           message: `📋 Using session project: "${currentProject.name}"`,
           buildId, 
           sessionId,
-          projectId: currentProjectId,
+          projectId: projectId,
           projectName: currentProject.name,
           matchReason
         });
@@ -423,7 +482,7 @@ export function initializeModificationRoutes(
           message: `⚠️ No URL match. Using recent: "${currentProject.name}"`,
           buildId, 
           sessionId,
-          projectId: currentProjectId,
+          projectId: projectId,
           projectName: currentProject.name,
           matchReason
         });
@@ -443,9 +502,9 @@ export function initializeModificationRoutes(
       let userProject = currentProject;
 
       // Enhanced project resolution using URL manager
-      if (currentProjectId) {
-        sendEvent('progress', { step: 3, total: 16, message: `Loading project: ${currentProjectId}...`, buildId, sessionId });
-        const projectUrls = await urlManager.getProjectUrls({ projectId: currentProjectId });
+      if (projectId) {
+        sendEvent('progress', { step: 3, total: 16, message: `Loading project: ${projectId}...`, buildId, sessionId });
+        const projectUrls = await urlManager.getProjectUrls({ projectId: projectId });
         if (projectUrls && projectUrls.zipUrl) {
           tempBuildDir = await downloadAndExtractProject(buildId, projectUrls.zipUrl);
           sessionContext = {
@@ -598,11 +657,11 @@ export function initializeModificationRoutes(
           // USE ENHANCED URL MANAGER - UPDATE EXISTING PROJECT
           let urlResult: any = { action: 'no_project_to_update', projectId: null };
           
-          if (currentProjectId) {
+          if (projectId) {
             try {
               const updatedProjectId = await urlManager.saveNewProjectUrls(
                 sessionId,
-                currentProjectId,
+                projectId,
                 {
                   deploymentUrl: previewUrl as string,
                   downloadUrl: urls.downloadUrl,
@@ -628,7 +687,7 @@ export function initializeModificationRoutes(
               console.error(`[${buildId}] ❌ Failed to update project URLs:`, updateError);
               urlResult = { 
                 action: 'update_failed', 
-                projectId: currentProjectId,
+                projectId: projectId,
                 error: updateError instanceof Error ? updateError.message : 'Unknown error'
               };
             }
@@ -663,7 +722,7 @@ export function initializeModificationRoutes(
               buildId,
               sessionId,
               userId,
-              projectId: urlResult.projectId || currentProjectId,
+              projectId: urlResult.projectId || projectId,
               projectName: userProject?.name,
               projectAction: urlResult.action,
               projectMatchReason: matchReason,
@@ -695,7 +754,7 @@ export function initializeModificationRoutes(
               buildId,
               sessionId,
               userId,
-              projectId: currentProjectId,
+              projectId: projectId,
               projectName: userProject?.name,
               projectMatchReason: matchReason,
               message: "Modification completed, but build/deploy failed"
@@ -712,7 +771,7 @@ export function initializeModificationRoutes(
           buildId,
           sessionId,
           userId,
-          projectId: currentProjectId,
+          projectId: projectId,
           projectName: userProject?.name,
           projectMatchReason: matchReason
         });

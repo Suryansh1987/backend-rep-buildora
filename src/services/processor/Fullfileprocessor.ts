@@ -4,7 +4,7 @@
 
 import { join, basename, dirname, resolve, relative, isAbsolute } from 'path';
 import { promises as fs } from 'fs';
-
+import {fullFilePrompt} from '../filemodifier/template'
 // ============================================================================
 // UPGRADED PATH MANAGER (Inspired by FixedPathManager)
 // ============================================================================
@@ -510,7 +510,8 @@ Continue for all files. Be sure to include the FILE comment for each..
       max_tokens: 8000,
       temperature: 0.1,
       messages: [{ role: 'user', content: modificationPrompt }],
-    });
+      system:fullFilePrompt
+        });
 
     const responseText = response.content[0]?.text || '';
     return this.extractModifiedFiles(responseText, relevantFiles);

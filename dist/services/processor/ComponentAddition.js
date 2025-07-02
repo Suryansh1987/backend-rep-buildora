@@ -1,6 +1,6 @@
 "use strict";
 // ============================================================================
-// FIXED COMPONENT PROCESSOR - SOLVES DIRECTORY/FILE PATH ERRORS
+// ENHANCED COMPONENT PROCESSOR - WITH FILE ANALYSIS & BATCH PROCESSING
 // ============================================================================
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
@@ -15,10 +15,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.EnhancedAtomicComponentProcessor = void 0;
 const path_1 = require("path");
 const fs_1 = require("fs");
+const template_1 = require("../filemodifier/template"); // Your existing prompts
 // ============================================================================
-// ROOT CAUSE FIX: PROPER PATH MANAGER
+// ENHANCED PATH MANAGER (From FixedPathManager)
 // ============================================================================
-class FixedPathManager {
+class EnhancedPathManager {
     constructor(reactBasePath) {
         this.reactBasePath = (0, path_1.resolve)(reactBasePath);
     }
@@ -30,40 +31,53 @@ class FixedPathManager {
             this.streamCallback(message);
         }
     }
-    /**
-     * CRITICAL FIX: Properly resolve file paths, never directories
-     */
     resolveFilePath(inputPath) {
-        // Clean the input path
         let cleanPath = inputPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-        // Ensure it starts with src/ if it doesn't already
         if (!cleanPath.startsWith('src/')) {
             cleanPath = `src/${cleanPath}`;
         }
-        // Ensure it has a file extension
         if (!cleanPath.match(/\.(tsx?|jsx?)$/)) {
             cleanPath += '.tsx';
         }
-        // Join with base path and resolve
         const fullPath = (0, path_1.resolve)((0, path_1.join)(this.reactBasePath, cleanPath));
         this.streamUpdate(`📍 Resolved file path: ${inputPath} → ${fullPath}`);
         return fullPath;
     }
-    /**
-     * SAFE: Create file with proper directory handling
-     */
+    fileExists(filePath) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const fullPath = this.resolveFilePath(filePath);
+                yield fs_1.promises.access(fullPath, fs_1.promises.constants.F_OK);
+                return true;
+            }
+            catch (_a) {
+                return false;
+            }
+        });
+    }
+    readFile(filePath) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                const fullPath = this.resolveFilePath(filePath);
+                const content = yield fs_1.promises.readFile(fullPath, 'utf8');
+                this.streamUpdate(`📖 Read file: ${fullPath} (${content.length} chars)`);
+                return content;
+            }
+            catch (error) {
+                this.streamUpdate(`❌ Failed to read file ${filePath}: ${error}`);
+                return null;
+            }
+        });
+    }
     safeCreateFile(filePath, content) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // Get the FULL FILE PATH (not directory)
                 const fullFilePath = this.resolveFilePath(filePath);
-                // Get the DIRECTORY containing the file
                 const directoryPath = (0, path_1.dirname)(fullFilePath);
                 this.streamUpdate(`📁 Creating directory: ${directoryPath}`);
                 yield fs_1.promises.mkdir(directoryPath, { recursive: true });
                 this.streamUpdate(`💾 Writing file: ${fullFilePath}`);
                 yield fs_1.promises.writeFile(fullFilePath, content, 'utf8');
-                // Verify the file was created
                 const stats = yield fs_1.promises.stat(fullFilePath);
                 this.streamUpdate(`✅ File created successfully: ${fullFilePath} (${stats.size} bytes)`);
                 return {
@@ -80,15 +94,10 @@ class FixedPathManager {
             }
         });
     }
-    /**
-     * SAFE: Update existing file
-     */
     safeUpdateFile(filePath, content) {
         return __awaiter(this, void 0, void 0, function* () {
             try {
-                // Get the FULL FILE PATH (not directory)
                 const fullFilePath = this.resolveFilePath(filePath);
-                // Check if file exists first
                 try {
                     yield fs_1.promises.access(fullFilePath, fs_1.promises.constants.F_OK);
                 }
@@ -100,7 +109,6 @@ class FixedPathManager {
                 }
                 this.streamUpdate(`🔄 Updating existing file: ${fullFilePath}`);
                 yield fs_1.promises.writeFile(fullFilePath, content, 'utf8');
-                // Verify the update
                 const stats = yield fs_1.promises.stat(fullFilePath);
                 this.streamUpdate(`✅ File updated successfully: ${fullFilePath} (${stats.size} bytes)`);
                 return {
@@ -117,181 +125,333 @@ class FixedPathManager {
             }
         });
     }
-    /**
-     * Find existing App file (helper for routing updates)
-     */
-    findAppFile() {
-        return __awaiter(this, void 0, void 0, function* () {
-            const possiblePaths = [
-                'src/App.tsx',
-                'src/App.jsx',
-                'src/app.tsx',
-                'src/app.jsx'
-            ];
-            for (const path of possiblePaths) {
-                const fullPath = this.resolveFilePath(path);
-                try {
-                    yield fs_1.promises.access(fullPath, fs_1.promises.constants.F_OK);
-                    this.streamUpdate(`📍 Found App file: ${fullPath}`);
-                    return fullPath;
-                }
-                catch (_a) {
-                    continue;
-                }
-            }
-            this.streamUpdate(`⚠️ No App file found`);
-            return null;
-        });
-    }
-    /**
-     * Read file content safely
-     */
-    readFile(filePath) {
-        return __awaiter(this, void 0, void 0, function* () {
-            try {
-                const fullPath = this.resolveFilePath(filePath);
-                const content = yield fs_1.promises.readFile(fullPath, 'utf8');
-                this.streamUpdate(`📖 Read file: ${fullPath} (${content.length} chars)`);
-                return content;
-            }
-            catch (error) {
-                this.streamUpdate(`❌ Failed to read file ${filePath}: ${error}`);
-                return null;
-            }
-        });
-    }
 }
-class SimpleComponentAnalyzer {
-    constructor(anthropic) {
+class FileRequirementAnalyzer {
+    constructor(anthropic, pathManager) {
         this.anthropic = anthropic;
+        this.pathManager = pathManager;
     }
-    analyzeComponent(prompt) {
-        return __awaiter(this, void 0, void 0, function* () {
-            var _a, _b, _c;
-            const analysisPrompt = `
-Analyze this request and decide: COMPONENT or PAGE?
-
-REQUEST: "${prompt}"
-
-RULES:
-- PAGE: Full screens users navigate to (About, Contact, Dashboard, Home, Services, Blog)
-- COMPONENT: Reusable UI pieces that go inside pages (Button, Card, Form, Modal, Header)
-
-PAGE keywords: "page", "screen", "route", "about", "contact", "dashboard", "home", "services", "blog"
-COMPONENT keywords: "component", "button", "card", "form", "modal", "header", "footer", "table", "list"
-
-FORMAT:
-TYPE: component|page
-NAME: [PascalCase]
-CONFIDENCE: [0-100]
-REASONING: [brief explanation]
-`;
-            try {
-                const response = yield this.anthropic.messages.create({
-                    model: 'claude-3-5-sonnet-20240620',
-                    max_tokens: 300,
-                    temperature: 0,
-                    messages: [{ role: 'user', content: analysisPrompt }],
-                });
-                const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
-                const typeMatch = text.match(/TYPE:\s*(component|page)/i);
-                const nameMatch = text.match(/NAME:\s*([A-Za-z][A-Za-z0-9]*)/);
-                const confidenceMatch = text.match(/CONFIDENCE:\s*(\d+)/);
-                const reasoningMatch = text.match(/REASONING:\s*(.*?)(?:\n|$)/);
-                return {
-                    type: ((_b = typeMatch === null || typeMatch === void 0 ? void 0 : typeMatch[1]) === null || _b === void 0 ? void 0 : _b.toLowerCase()) || 'component',
-                    name: (nameMatch === null || nameMatch === void 0 ? void 0 : nameMatch[1]) || this.extractNameFromPrompt(prompt),
-                    confidence: confidenceMatch ? parseInt(confidenceMatch[1]) : 70,
-                    reasoning: ((_c = reasoningMatch === null || reasoningMatch === void 0 ? void 0 : reasoningMatch[1]) === null || _c === void 0 ? void 0 : _c.trim()) || 'AI classification'
-                };
-            }
-            catch (error) {
-                // Fallback on error
-                return this.fallbackAnalysis(prompt);
-            }
-        });
-    }
-    extractNameFromPrompt(prompt) {
-        const words = prompt.split(/\s+/).filter(word => word.length > 2 && !['the', 'and', 'create', 'add', 'make', 'new', 'for', 'with'].includes(word.toLowerCase()));
-        const name = words.length > 0 ? words[0].replace(/[^a-zA-Z]/g, '') : 'NewComponent';
-        return name.charAt(0).toUpperCase() + name.slice(1);
-    }
-    fallbackAnalysis(prompt) {
-        const promptLower = prompt.toLowerCase();
-        // Page indicators
-        if (promptLower.includes('page') ||
-            promptLower.includes('about') ||
-            promptLower.includes('contact') ||
-            promptLower.includes('dashboard') ||
-            promptLower.includes('home') ||
-            promptLower.includes('services')) {
-            return {
-                type: 'page',
-                name: this.extractNameFromPrompt(prompt),
-                confidence: 80,
-                reasoning: 'Contains page-related keywords'
-            };
-        }
-        // Default to component
-        return {
-            type: 'component',
-            name: this.extractNameFromPrompt(prompt),
-            confidence: 60,
-            reasoning: 'Defaulted to reusable component'
-        };
-    }
-}
-// ============================================================================
-// CONTENT GENERATOR
-// ============================================================================
-class SimpleContentGenerator {
-    constructor(anthropic) {
-        this.anthropic = anthropic;
-    }
-    generateComponent(prompt, analysis) {
+    analyzeRequirements(prompt, existingFiles) {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
-            const isPage = analysis.type === 'page';
-            const generationPrompt = `
-Create a React TypeScript ${analysis.type} for this request:
+            // Create detailed file summaries from existing project files
+            const fileSummaries = Array.from(existingFiles.entries())
+                .map(([path, file]) => {
+                const purpose = this.inferFilePurpose(file);
+                const preview = file.content.substring(0, 200).replace(/\n/g, ' ');
+                return `${path} (${file.lines} lines) - ${purpose}\n  Preview: ${preview}...`;
+            })
+                .join('\n\n');
+            const analysisPrompt = `
+TASK: Analyze what component/page to create and what EXISTING files will need INTEGRATION updates.
 
 USER REQUEST: "${prompt}"
-${analysis.type.toUpperCase()} NAME: ${analysis.name}
 
-REQUIREMENTS:
-- Use TypeScript (.tsx)
-- Export as default: export default ${analysis.name};
-- Use React functional component
-- Style with Tailwind CSS classes
-- Make it responsive and modern
-- ${isPage ? 'Include multiple sections (hero, content, etc.)' : 'Include props interface if needed'}
-- Add relevant content based on the request
+EXISTING PROJECT FILES:
+${fileSummaries}
 
-RESPONSE: Return ONLY the complete ${analysis.type} code:
+ANALYSIS REQUIREMENTS:
+1. Determine if this is a COMPONENT or PAGE
+2. Extract the name (PascalCase)
+3. Identify which EXISTING files need updates for proper integration
+4. Plan the new file that needs to be created
+5. Mark each file as required(true/false) based on necessity
 
-\`\`\`tsx
-[COMPLETE CODE HERE]
-\`\`\`
+INTEGRATION PATTERNS:
+FOR PAGES:
+- CREATE: src/pages/PageName.tsx (required: true) - Main page file to CREATE
+- UPDATE: src/App.tsx (required: true) - MUST UPDATE for routing integration
+- UPDATE: src/components/Header.tsx (required: true) - MUST UPDATE for navigation links
+- UPDATE: src/components/Navbar.tsx (required: true) - MUST UPDATE for navigation
+- UPDATE: src/components/Layout.tsx (required: false) - If layout needs page integration
+
+FOR COMPONENTS:
+- CREATE: src/components/ComponentName.tsx (required: true) - Main component file to CREATE
+- UPDATE: src/pages/HomePage.tsx (required: true) - MUST UPDATE to import and use component
+- UPDATE: src/App.tsx (required: false) - Usually not needed for components
+- UPDATE: src/components/Layout.tsx (required: false) - If component used in layout
+
+IMPORTANT: Only select files that ACTUALLY EXIST in the project files list above!
+IMPORTANT: For PAGES, always include App.tsx + Header/Navbar for integration IF THEY EXIST
+IMPORTANT: For COMPONENTS, always include HomePage.tsx or relevant pages that will use it IF THEY EXIST
+
+PAGE KEYWORDS: "page", "screen", "route", "about", "contact", "dashboard", "home", "services", "blog"
+COMPONENT KEYWORDS: "component", "button", "card", "form", "modal", "header", "footer", "table", "list"
+
+RESPONSE FORMAT (JSON):
+{
+  "type": "component|page",
+  "name": "ComponentName",
+  "confidence": 85,
+  "reasoning": "Brief explanation",
+  "fileRequirements": [
+    {
+      "filePath": "src/pages/ComponentName.tsx",
+      "required": true,
+      "purpose": "Main page file to create",
+      "priority": "high"
+    },
+    {
+      "filePath": "src/App.tsx",
+      "required": true,
+      "purpose": "Add routing integration",
+      "priority": "high"
+    },
+    {
+      "filePath": "src/components/Header.tsx",
+      "required": true,
+      "purpose": "Add navigation link",
+      "priority": "medium"
+    }
+  ]
+}
 `;
-            try {
-                const response = yield this.anthropic.messages.create({
-                    model: 'claude-3-5-sonnet-20240620',
-                    max_tokens: 3000,
-                    temperature: 0.3,
-                    messages: [{ role: 'user', content: generationPrompt }],
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 1000,
+                temperature: 0,
+                messages: [{ role: 'user', content: analysisPrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            const analysis = JSON.parse(jsonMatch[0]);
+            return yield this.enhanceWithExistenceCheck(analysis, existingFiles);
+        });
+    }
+    enhanceWithExistenceCheck(analysis, existingFiles) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Check which files actually exist in the project
+            const enhancedRequirements = [];
+            this.pathManager['streamUpdate'](`🔍 ANALYZING FILE REQUIREMENTS:`);
+            for (const req of analysis.fileRequirements) {
+                // Check if file exists in project files map
+                const exists = this.findFileInProject(req.filePath, existingFiles) !== null;
+                const operation = exists ?
+                    (req.required ? 'update' : 'skip') :
+                    (req.required ? 'create' : 'skip');
+                enhancedRequirements.push({
+                    filePath: req.filePath,
+                    required: req.required,
+                    exists,
+                    purpose: req.purpose,
+                    priority: req.priority || 'medium',
+                    operation
                 });
-                const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
-                const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
-                if (codeMatch) {
-                    return codeMatch[1].trim();
+                // Log each file analysis
+                const status = exists ? '✅ EXISTS' : '❌ MISSING';
+                const actionEmoji = operation === 'create' ? '🆕' : operation === 'update' ? '🔄' : '⏭️';
+                this.pathManager['streamUpdate'](`   📄 ${req.filePath}`);
+                this.pathManager['streamUpdate'](`      Status: ${status} | Action: ${actionEmoji} ${operation.toUpperCase()}`);
+                this.pathManager['streamUpdate'](`      Purpose: ${req.purpose} | Priority: ${req.priority}`);
+                this.pathManager['streamUpdate'](`      Required: ${req.required ? 'YES' : 'NO'}`);
+            }
+            this.pathManager['streamUpdate'](`📊 ANALYSIS SUMMARY:`);
+            this.pathManager['streamUpdate'](`   🆕 Files to CREATE: ${enhancedRequirements.filter(r => r.operation === 'create').length}`);
+            this.pathManager['streamUpdate'](`   🔄 Files to UPDATE: ${enhancedRequirements.filter(r => r.operation === 'update').length}`);
+            this.pathManager['streamUpdate'](`   ⏭️ Files to SKIP: ${enhancedRequirements.filter(r => r.operation === 'skip').length}`);
+            return {
+                type: analysis.type,
+                name: analysis.name,
+                confidence: analysis.confidence,
+                reasoning: analysis.reasoning,
+                fileRequirements: enhancedRequirements
+            };
+        });
+    }
+    findFileInProject(filePath, projectFiles) {
+        // Try exact match first
+        let file = projectFiles.get(filePath);
+        if (file)
+            return file;
+        // Try variations
+        const variations = [
+            filePath.replace(/^src\//, ''),
+            `src/${filePath.replace(/^src\//, '')}`,
+            filePath.replace(/\\/g, '/'),
+            filePath.replace(/\//g, '\\')
+        ];
+        for (const variation of variations) {
+            file = projectFiles.get(variation);
+            if (file)
+                return file;
+        }
+        // Try basename matching
+        const fileName = filePath.split('/').pop() || '';
+        for (const [key, value] of projectFiles) {
+            if (key.split('/').pop() === fileName) {
+                return value;
+            }
+        }
+        return null;
+    }
+    inferFilePurpose(file) {
+        if (file.isMainFile)
+            return 'Main application file';
+        if (file.relativePath.includes('component'))
+            return 'UI Component';
+        if (file.relativePath.includes('page'))
+            return 'Application Page';
+        if (file.relativePath.includes('hook'))
+            return 'Custom Hook';
+        if (file.relativePath.includes('util'))
+            return 'Utility Module';
+        if (file.relativePath.includes('service'))
+            return 'Service Module';
+        if (file.relativePath.includes('context'))
+            return 'Context Provider';
+        return `${file.fileType} file`;
+    }
+}
+class BatchContentGenerator {
+    constructor(anthropic, pathManager) {
+        this.anthropic = anthropic;
+        this.pathManager = pathManager;
+    }
+    generateBatch(prompt, analysis, existingFiles) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const results = [];
+            // Log what files will be processed
+            this.pathManager['streamUpdate'](`🎨 BATCH GENERATION STARTING:`);
+            const filesToCreate = analysis.fileRequirements.filter(req => req.operation === 'create');
+            const filesToUpdate = analysis.fileRequirements.filter(req => req.operation === 'update');
+            this.pathManager['streamUpdate'](`   🆕 Creating ${filesToCreate.length} new files:`);
+            filesToCreate.forEach(file => {
+                this.pathManager['streamUpdate'](`      📄 ${file.filePath} - ${file.purpose}`);
+            });
+            this.pathManager['streamUpdate'](`   🔄 Updating ${filesToUpdate.length} existing files:`);
+            filesToUpdate.forEach(file => {
+                this.pathManager['streamUpdate'](`      📄 ${file.filePath} - ${file.purpose}`);
+            });
+            // Generate new files
+            if (filesToCreate.length > 0) {
+                this.pathManager['streamUpdate'](`🆕 GENERATING NEW FILES...`);
+                const createdFiles = yield this.generateNewFiles(prompt, analysis, filesToCreate);
+                results.push(...createdFiles);
+            }
+            // Update existing files with integration
+            if (filesToUpdate.length > 0) {
+                this.pathManager['streamUpdate'](`🔄 UPDATING EXISTING FILES FOR INTEGRATION...`);
+                const updatedFiles = yield this.updateExistingFiles(prompt, analysis, filesToUpdate, existingFiles);
+                results.push(...updatedFiles);
+            }
+            this.pathManager['streamUpdate'](`✅ BATCH GENERATION COMPLETE: ${results.length} files processed`);
+            return results;
+        });
+    }
+    generateNewFiles(prompt, analysis, filesToCreate) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const results = [];
+            for (const fileReq of filesToCreate) {
+                if (fileReq.filePath.includes(`${analysis.name}.tsx`)) {
+                    // Generate main component/page file
+                    const content = yield this.generateMainFile(prompt, analysis);
+                    results.push({
+                        filePath: fileReq.filePath,
+                        content,
+                        operation: 'create',
+                        success: true
+                    });
                 }
-                // Fallback if no code block found
-                return this.generateFallbackComponent(analysis.name, analysis.type, prompt);
             }
-            catch (error) {
-                // Generate fallback component on error
-                return this.generateFallbackComponent(analysis.name, analysis.type, prompt);
+            return results;
+        });
+    }
+    updateExistingFiles(prompt, analysis, filesToUpdate, existingFiles) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const results = [];
+            for (const fileReq of filesToUpdate) {
+                this.pathManager['streamUpdate'](`🔄 Processing update: ${fileReq.filePath}`);
+                // Get original content from existing files map instead of reading from disk
+                const existingFile = this.findFileInProject(fileReq.filePath, existingFiles);
+                if (existingFile) {
+                    const originalContent = existingFile.content;
+                    let updatedContent;
+                    if (fileReq.filePath.includes('App.tsx') && analysis.type === 'page') {
+                        // Update App.tsx for page routing
+                        this.pathManager['streamUpdate'](`   🛣️ Adding routing for ${analysis.name} page`);
+                        updatedContent = yield this.generateAppUpdate(originalContent, analysis.name);
+                    }
+                    else if (fileReq.filePath.includes('Header.tsx') || fileReq.filePath.includes('Navbar.tsx')) {
+                        // Update navigation components for page links
+                        this.pathManager['streamUpdate'](`   🧭 Adding navigation link for ${analysis.name}`);
+                        updatedContent = yield this.generateNavigationUpdate(originalContent, analysis.name, analysis.type);
+                    }
+                    else if (fileReq.filePath.includes('HomePage.tsx') && analysis.type === 'component') {
+                        // Update HomePage to use new component
+                        this.pathManager['streamUpdate'](`   🏠 Adding ${analysis.name} component to HomePage`);
+                        updatedContent = yield this.generateHomePageUpdate(originalContent, analysis.name);
+                    }
+                    else if (fileReq.filePath.includes('Layout.tsx')) {
+                        // Update Layout to include new component/page
+                        this.pathManager['streamUpdate'](`   📐 Updating Layout for ${analysis.name}`);
+                        updatedContent = yield this.generateLayoutUpdate(originalContent, analysis.name, analysis.type);
+                    }
+                    else {
+                        // Generic update - add import and usage
+                        this.pathManager['streamUpdate'](`   🔗 Adding generic integration for ${analysis.name}`);
+                        updatedContent = yield this.generateGenericUpdate(originalContent, analysis.name, analysis.type);
+                    }
+                    results.push({
+                        filePath: fileReq.filePath,
+                        content: updatedContent,
+                        operation: 'update',
+                        success: true
+                    });
+                    this.pathManager['streamUpdate'](`   ✅ Update content generated (${updatedContent.length} chars)`);
+                }
+                else {
+                    this.pathManager['streamUpdate'](`   ❌ Could not find file in existing files: ${fileReq.filePath}`);
+                }
             }
+            return results;
+        });
+    }
+    findFileInProject(filePath, projectFiles) {
+        // Try exact match first
+        let file = projectFiles.get(filePath);
+        if (file)
+            return file;
+        // Try variations
+        const variations = [
+            filePath.replace(/^src\//, ''),
+            `src/${filePath.replace(/^src\//, '')}`,
+            filePath.replace(/\\/g, '/'),
+            filePath.replace(/\//g, '\\')
+        ];
+        for (const variation of variations) {
+            file = projectFiles.get(variation);
+            if (file)
+                return file;
+        }
+        // Try basename matching
+        const fileName = filePath.split('/').pop() || '';
+        for (const [key, value] of projectFiles) {
+            if (key.split('/').pop() === fileName) {
+                return value;
+            }
+        }
+        return null;
+    }
+    generateMainFile(prompt, analysis) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const templatePrompt = analysis.type === 'page' ? template_1.pagePrompt : template_1.componentPrompt;
+            const finalPrompt = templatePrompt
+                .replace(/\{userRequest\}/g, prompt)
+                .replace(/\{componentName\}/g, analysis.name)
+                .replace(/\{pageName\}/g, analysis.name)
+                .replace(/\{componentType\}/g, analysis.type)
+                .replace(/\{componentPurpose\}/g, `${analysis.type} for: ${prompt}`)
+                .replace(/\{pageDescription\}/g, `${analysis.name} page based on: ${prompt}`);
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 4000,
+                temperature: 0.3,
+                messages: [{ role: 'user', content: finalPrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+            return codeMatch[1].trim();
         });
     }
     generateAppUpdate(originalContent, componentName) {
@@ -317,116 +477,166 @@ Return ONLY the complete updated App code:
 [UPDATED APP CODE]
 \`\`\`
 `;
-            try {
-                const response = yield this.anthropic.messages.create({
-                    model: 'claude-3-5-sonnet-20240620',
-                    max_tokens: 4000,
-                    temperature: 0,
-                    messages: [{ role: 'user', content: updatePrompt }],
-                });
-                const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
-                const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
-                return codeMatch ? codeMatch[1].trim() : originalContent;
-            }
-            catch (error) {
-                return originalContent; // Return original if update fails
-            }
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 4000,
+                temperature: 0,
+                messages: [{ role: 'user', content: updatePrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+            return codeMatch[1].trim();
         });
     }
-    generateFallbackComponent(name, type, prompt) {
-        if (type === 'page') {
-            return `import React from 'react';
+    generateNavigationUpdate(originalContent, componentName, type) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const updatePrompt = `
+Update this navigation component to add a link for the new ${type} "${componentName}":
 
-const ${name} = () => {
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="container mx-auto px-4 py-8">
-        <h1 className="text-4xl font-bold text-gray-900 mb-6">
-          ${name}
-        </h1>
-        <div className="bg-white rounded-lg shadow-lg p-8">
-          <p className="text-lg text-gray-600 mb-6">
-            Welcome to the ${name} page.
-          </p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-blue-50 p-6 rounded-lg">
-              <h2 className="text-xl font-semibold text-blue-900 mb-3">Feature 1</h2>
-              <p className="text-blue-700">Description of the first feature or section.</p>
-            </div>
-            <div className="bg-green-50 p-6 rounded-lg">
-              <h2 className="text-xl font-semibold text-green-900 mb-3">Feature 2</h2>
-              <p className="text-green-700">Description of the second feature or section.</p>
-            </div>
-          </div>
-          <div className="mt-8 text-center">
-            <button className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg transition duration-200">
-              Get Started
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
+CURRENT NAVIGATION:
+\`\`\`tsx
+${originalContent}
+\`\`\`
 
-export default ${name};`;
-        }
-        else {
-            return `import React from 'react';
+REQUIREMENTS:
+1. Add a navigation link for ${componentName}
+2. Use proper routing path: /${componentName.toLowerCase()}
+3. Add appropriate icon if other nav items have icons
+4. Maintain existing styling and structure
+5. Place the new link in logical order with other navigation items
 
-interface ${name}Props {
-  title?: string;
-  className?: string;
-  children?: React.ReactNode;
-}
+Return ONLY the complete updated navigation code:
 
-const ${name}: React.FC<${name}Props> = ({ 
-  title = '${name}',
-  className = '',
-  children 
-}) => {
-  return (
-    <div className={\`bg-white border border-gray-200 rounded-lg shadow-sm p-6 \${className}\`}>
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
-        <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-      </div>
-      <div className="space-y-4">
-        <p className="text-gray-600">
-          This is the ${name} component. Customize it for your needs.
-        </p>
-        {children && (
-          <div className="mt-4">
-            {children}
-          </div>
-        )}
-        <div className="flex gap-2 mt-4">
-          <button className="px-4 py-2 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition duration-200">
-            Action
-          </button>
-          <button className="px-4 py-2 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition duration-200">
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
+\`\`\`tsx
+[UPDATED NAVIGATION CODE]
+\`\`\`
+`;
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 4000,
+                temperature: 0,
+                messages: [{ role: 'user', content: updatePrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+            return codeMatch[1].trim();
+        });
+    }
+    generateHomePageUpdate(originalContent, componentName) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const updatePrompt = `
+Update this HomePage to import and use the new component "${componentName}":
 
-export default ${name};`;
-        }
+CURRENT HOMEPAGE:
+\`\`\`tsx
+${originalContent}
+\`\`\`
+
+REQUIREMENTS:
+1. Add import: import ${componentName} from '../components/${componentName}';
+2. Add the component to the page in a logical location
+3. Pass appropriate props if the component expects them
+4. Maintain existing page structure and styling
+5. Make it look integrated, not just added
+
+Return ONLY the complete updated HomePage code:
+
+\`\`\`tsx
+[UPDATED HOMEPAGE CODE]
+\`\`\`
+`;
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 4000,
+                temperature: 0,
+                messages: [{ role: 'user', content: updatePrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+            return codeMatch[1].trim();
+        });
+    }
+    generateLayoutUpdate(originalContent, componentName, type) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const updatePrompt = `
+Update this Layout component to integrate the new ${type} "${componentName}":
+
+CURRENT LAYOUT:
+\`\`\`tsx
+${originalContent}
+\`\`\`
+
+REQUIREMENTS:
+1. If it's a component, import and add it appropriately to the layout
+2. If it's a page, ensure the layout supports the new page route
+3. Maintain existing layout structure
+4. Add proper integration without breaking existing functionality
+
+Return ONLY the complete updated Layout code:
+
+\`\`\`tsx
+[UPDATED LAYOUT CODE]
+\`\`\`
+`;
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 4000,
+                temperature: 0,
+                messages: [{ role: 'user', content: updatePrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+            return codeMatch[1].trim();
+        });
+    }
+    generateGenericUpdate(originalContent, componentName, type) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            const updatePrompt = `
+Update this file to integrate the new ${type} "${componentName}":
+
+CURRENT FILE:
+\`\`\`tsx
+${originalContent}
+\`\`\`
+
+REQUIREMENTS:
+1. Import the new ${type} appropriately
+2. Add it to the file in a logical way
+3. Maintain existing functionality
+4. Ensure proper integration
+
+Return ONLY the complete updated file code:
+
+\`\`\`tsx
+[UPDATED FILE CODE]
+\`\`\`
+`;
+            const response = yield this.anthropic.messages.create({
+                model: 'claude-3-5-sonnet-20240620',
+                max_tokens: 4000,
+                temperature: 0,
+                messages: [{ role: 'user', content: updatePrompt }],
+            });
+            const text = ((_a = response.content[0]) === null || _a === void 0 ? void 0 : _a.type) === 'text' ? response.content[0].text : '';
+            const codeMatch = text.match(/```(?:tsx|typescript|jsx|javascript)\n([\s\S]*?)```/);
+            return codeMatch[1].trim();
+        });
     }
 }
 // ============================================================================
-// MAIN FIXED PROCESSOR
+// MAIN ENHANCED COMPONENT PROCESSOR
 // ============================================================================
 class EnhancedAtomicComponentProcessor {
     constructor(anthropic, reactBasePath) {
         this.anthropic = anthropic;
         this.reactBasePath = reactBasePath;
-        this.pathManager = new FixedPathManager(reactBasePath);
-        this.analyzer = new SimpleComponentAnalyzer(anthropic);
-        this.generator = new SimpleContentGenerator(anthropic);
+        this.pathManager = new EnhancedPathManager(reactBasePath);
+        this.analyzer = new FileRequirementAnalyzer(anthropic, this.pathManager);
+        this.generator = new BatchContentGenerator(anthropic, this.pathManager);
     }
     setStreamCallback(callback) {
         this.streamCallback = callback;
@@ -439,232 +649,304 @@ class EnhancedAtomicComponentProcessor {
     }
     handleComponentAddition(prompt, scope, projectFiles, modificationSummary, componentGenerationSystem, projectSummaryCallback) {
         return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('🚀 FIXED: Starting component creation with proper path handling...');
+            var _a;
+            this.streamUpdate('🚀 ENHANCED: Starting component creation with file analysis...');
             try {
-                // STEP 1: Analyze what to create
-                this.streamUpdate('🔍 Step 1: Analyzing component type...');
-                const analysis = yield this.analyzer.analyzeComponent(prompt);
-                this.streamUpdate(`📝 Decision: ${analysis.name} (${analysis.type}) - ${analysis.confidence}% confidence`);
-                this.streamUpdate(`💭 Reasoning: ${analysis.reasoning}`);
-                // STEP 2: Generate content
-                this.streamUpdate('🎨 Step 2: Generating content...');
-                const content = yield this.generator.generateComponent(prompt, analysis);
-                this.streamUpdate(`✅ Generated ${analysis.type} content (${content.length} characters)`);
-                // STEP 3: Create the main file
-                this.streamUpdate('📁 Step 3: Creating main file...');
-                const folder = analysis.type === 'page' ? 'pages' : 'components';
-                const mainFilePath = `src/${folder}/${analysis.name}.tsx`;
-                const createResult = yield this.pathManager.safeCreateFile(mainFilePath, content);
-                if (!createResult.success) {
-                    throw new Error(`Failed to create main file: ${createResult.error}`);
-                }
-                const createdFiles = [mainFilePath];
-                const updatedFiles = [];
-                // STEP 4: Update App.tsx for pages
-                if (analysis.type === 'page') {
-                    this.streamUpdate('📝 Step 4: Updating App.tsx for routing...');
-                    const appFilePath = yield this.pathManager.findAppFile();
-                    if (appFilePath) {
-                        const originalAppContent = (yield this.pathManager.readFile('src/App.tsx')) ||
-                            (yield this.pathManager.readFile('src/App.jsx'));
-                        if (originalAppContent) {
-                            const updatedAppContent = yield this.generator.generateAppUpdate(originalAppContent, analysis.name);
-                            const updateResult = yield this.pathManager.safeUpdateFile('src/App.tsx', updatedAppContent);
-                            if (updateResult.success) {
-                                updatedFiles.push('src/App.tsx');
-                                this.streamUpdate('✅ App.tsx updated with new route');
-                            }
-                            else {
-                                this.streamUpdate(`⚠️ App.tsx update failed: ${updateResult.error}`);
-                            }
-                        }
-                    }
-                }
-                else {
-                    this.streamUpdate('⏭️ Step 4: Skipped (components don\'t need App.tsx updates)');
-                }
-                // STEP 5: Log changes
-                this.streamUpdate('📊 Step 5: Logging changes...');
-                yield modificationSummary.addChange('created', mainFilePath, `Created ${analysis.type}: ${analysis.name}`, {
-                    success: true,
-                    linesChanged: content.split('\n').length,
-                    reasoning: analysis.reasoning
+                // STEP 0: Scan existing project files first (like full file modifier)
+                this.streamUpdate('📂 Step 0: Scanning existing project files...');
+                const existingFiles = yield this.scanProjectFiles();
+                this.streamUpdate(`📊 SCANNED PROJECT FILES:`);
+                this.streamUpdate(`   📁 Total files found: ${existingFiles.size}`);
+                existingFiles.forEach((file, path) => {
+                    this.streamUpdate(`   📄 ${path} (${file.lines} lines) - ${file.fileType}`);
                 });
-                if (updatedFiles.length > 0) {
-                    for (const file of updatedFiles) {
-                        yield modificationSummary.addChange('updated', file, `Added routing for ${analysis.name} page`, { success: true, reasoning: 'Page routing integration' });
-                    }
+                // STEP 1: Analyze requirements using existing files (like full file modifier)
+                this.streamUpdate('🔍 Step 1: Analyzing requirements with existing files...');
+                const analysis = yield this.analyzer.analyzeRequirements(prompt, existingFiles);
+                this.streamUpdate(`📝 Analysis Complete:`);
+                this.streamUpdate(`   Type: ${analysis.name} (${analysis.type}) - ${analysis.confidence}% confidence`);
+                this.streamUpdate(`   Reasoning: ${analysis.reasoning}`);
+                this.streamUpdate(`   Files Required: ${analysis.fileRequirements.length}`);
+                // Log file analysis
+                analysis.fileRequirements.forEach(req => {
+                    const status = req.exists ? '✅ EXISTS' : '❌ MISSING';
+                    const operation = req.operation.toUpperCase();
+                    this.streamUpdate(`   📄 ${req.filePath} - ${status} - ${operation} (${req.priority} priority)`);
+                    this.streamUpdate(`      Purpose: ${req.purpose}`);
+                });
+                // STEP 2: Generate batch content with existing files
+                this.streamUpdate('🎨 Step 2: Generating batch content with existing files...');
+                const generatedFiles = yield this.generator.generateBatch(prompt, analysis, existingFiles);
+                this.streamUpdate(`✅ Generated ${generatedFiles.length} files:`);
+                generatedFiles.forEach(file => {
+                    this.streamUpdate(`   📄 ${file.filePath} (${file.operation}) - ${file.content.length} chars`);
+                });
+                // STEP 3: Apply all changes in batch
+                this.streamUpdate('💾 Step 3: Applying batch changes...');
+                const applyResult = yield this.applyBatchChanges(generatedFiles, analysis);
+                // STEP 4: Update modification summary
+                this.streamUpdate('📊 Step 4: Updating modification summary...');
+                const createdFiles = applyResult.results.filter(r => r.operation === 'create' && r.success);
+                const updatedFiles = applyResult.results.filter(r => r.operation === 'update' && r.success);
+                for (const result of applyResult.results) {
+                    yield modificationSummary.addChange(result.success ? result.operation + 'd' : 'failed', result.filePath, result.success ?
+                        `${result.operation === 'create' ? 'Created' : 'Updated'} ${analysis.type}: ${analysis.name}` :
+                        `Failed to ${result.operation} file`, {
+                        success: result.success,
+                        linesChanged: ((_a = result.content) === null || _a === void 0 ? void 0 : _a.split('\n').length) || 0,
+                        reasoning: result.success ? analysis.reasoning : result.error
+                    });
                 }
-                // SUCCESS!
-                this.streamUpdate(`🎉 SUCCESS! Created ${analysis.name} ${analysis.type}`);
+                // SUCCESS SUMMARY
+                this.streamUpdate(`🎉 BATCH SUCCESS!`);
                 this.streamUpdate(`   📁 Created: ${createdFiles.length} files`);
                 this.streamUpdate(`   📝 Updated: ${updatedFiles.length} files`);
+                this.streamUpdate(`   ❌ Failed: ${applyResult.failedCount} operations`);
                 return {
-                    success: true,
-                    selectedFiles: updatedFiles,
-                    addedFiles: createdFiles,
-                    approach: 'COMPONENT_ADDITION',
-                    reasoning: `Successfully created ${analysis.name} ${analysis.type}. ` +
-                        `Generated ${createdFiles.length} new files and updated ${updatedFiles.length} existing files.`,
+                    success: applyResult.successCount > 0,
+                    selectedFiles: updatedFiles.map(f => f.filePath),
+                    addedFiles: createdFiles.map(f => f.filePath),
+                    approach: 'ENHANCED_COMPONENT_ADDITION',
+                    reasoning: `Successfully processed ${analysis.name} ${analysis.type}. ` +
+                        `Applied ${applyResult.successCount}/${generatedFiles.length} file operations.`,
                     modificationSummary: yield modificationSummary.getSummary(),
                     componentGenerationResult: {
                         success: true,
-                        generatedFile: mainFilePath,
-                        updatedFiles,
-                        integrationPath: analysis.type,
+                        generatedFiles: createdFiles.map(f => f.filePath),
+                        updatedFiles: updatedFiles.map(f => f.filePath),
+                        analysis: analysis,
                         projectSummary: ''
                     },
                     tokenUsage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } // Placeholder
                 };
             }
             catch (error) {
-                this.streamUpdate(`❌ FIXED processor failed: ${error}`);
-                //@ts-ignore
-                return yield this.emergencyCreateComponent(prompt, (analysis === null || analysis === void 0 ? void 0 : analysis.name) || 'NewComponent');
+                this.streamUpdate(`❌ Enhanced processor failed: ${error}`);
+                throw error;
             }
         });
     }
     /**
-     * Emergency fallback - create component with minimal dependencies
+     * Scan project files (inspired by full file modifier)
      */
-    emergencyCreateComponent(prompt, componentName) {
+    scanProjectFiles() {
         return __awaiter(this, void 0, void 0, function* () {
-            this.streamUpdate('🚨 EMERGENCY: Creating component with minimal dependencies...');
-            try {
-                // Simple name extraction if not provided
-                if (!componentName || componentName === 'NewComponent') {
-                    const words = prompt.split(/\s+/);
-                    for (const word of words) {
-                        const clean = word.replace(/[^a-zA-Z]/g, '');
-                        if (clean.length > 2 && !['the', 'and', 'create', 'add', 'make', 'new'].includes(clean.toLowerCase())) {
-                            componentName = clean.charAt(0).toUpperCase() + clean.slice(1);
-                            break;
+            const projectFiles = new Map();
+            const scanDirectory = (dir_1, ...args_1) => __awaiter(this, [dir_1, ...args_1], void 0, function* (dir, baseDir = this.reactBasePath) {
+                try {
+                    const entries = yield fs_1.promises.readdir(dir, { withFileTypes: true });
+                    for (const entry of entries) {
+                        const fullPath = (0, path_1.join)(dir, entry.name);
+                        const relativePath = (0, path_1.relative)(baseDir, fullPath).replace(/\\/g, '/');
+                        if (entry.isDirectory() && !this.shouldSkipDirectory(entry.name)) {
+                            yield scanDirectory(fullPath, baseDir);
+                        }
+                        else if (entry.isFile() && this.isRelevantFile(entry.name)) {
+                            try {
+                                const content = yield fs_1.promises.readFile(fullPath, 'utf8');
+                                const stats = yield fs_1.promises.stat(fullPath);
+                                const projectFile = {
+                                    path: fullPath,
+                                    relativePath,
+                                    content,
+                                    lines: content.split('\n').length,
+                                    isMainFile: this.isMainFile(entry.name, relativePath),
+                                    fileType: this.determineFileType(entry.name),
+                                    lastModified: stats.mtime
+                                };
+                                projectFiles.set(relativePath, projectFile);
+                            }
+                            catch (readError) {
+                                this.streamUpdate(`⚠️ Could not read file: ${relativePath}`);
+                            }
                         }
                     }
                 }
-                // Determine type
-                const isPage = prompt.toLowerCase().includes('page') ||
-                    prompt.toLowerCase().includes('about') ||
-                    prompt.toLowerCase().includes('contact');
-                const type = isPage ? 'page' : 'component';
-                const folder = isPage ? 'pages' : 'components';
-                const filePath = `src/${folder}/${componentName}.tsx`;
-                // Generate minimal content
-                const content = this.generator['generateFallbackComponent'](componentName, type, prompt);
-                // Create file directly
-                const result = yield this.pathManager.safeCreateFile(filePath, content);
-                if (result.success) {
-                    this.streamUpdate(`✅ Emergency component created: ${filePath}`);
-                    return {
-                        success: true,
-                        selectedFiles: [],
-                        addedFiles: [filePath],
-                        approach: 'COMPONENT_ADDITION',
-                        reasoning: `Emergency component creation successful: ${componentName} ${type}`,
-                        componentGenerationResult: {
-                            success: true,
-                            generatedFile: filePath,
-                            updatedFiles: [],
-                            integrationPath: type,
-                            projectSummary: ''
-                        },
-                        tokenUsage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 }
-                    };
+                catch (error) {
+                    this.streamUpdate(`⚠️ Error scanning directory ${dir}: ${error}`);
                 }
-                else {
-                    throw new Error(`Emergency creation failed: ${result.error}`);
+            });
+            yield scanDirectory(this.reactBasePath);
+            return projectFiles;
+        });
+    }
+    shouldSkipDirectory(name) {
+        const skipPatterns = ['node_modules', '.git', '.next', 'dist', 'build'];
+        return skipPatterns.includes(name) || name.startsWith('.');
+    }
+    isRelevantFile(fileName) {
+        const extensions = ['.tsx', '.ts', '.jsx', '.js', '.css', '.json'];
+        return extensions.some(ext => fileName.endsWith(ext));
+    }
+    isMainFile(fileName, relativePath) {
+        return fileName === 'App.tsx' || fileName === 'App.jsx' ||
+            relativePath.includes('App.') || fileName === 'index.tsx';
+    }
+    determineFileType(fileName) {
+        if (fileName.endsWith('.tsx') || fileName.endsWith('.jsx'))
+            return 'react-component';
+        if (fileName.endsWith('.ts') || fileName.endsWith('.js'))
+            return 'module';
+        if (fileName.endsWith('.css'))
+            return 'stylesheet';
+        if (fileName.endsWith('.json'))
+            return 'config';
+        return 'unknown';
+    }
+    componentGenerationSystem(prompt, modificationSummary, componentGenerationSystem, projectSummaryCallback) {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _a;
+            this.streamUpdate('🚀 ENHANCED: Starting component creation with file analysis...');
+            try {
+                const existingFiles = yield this.scanProjectFiles();
+                this.streamUpdate('🔍 Step 1: Analyzing requirements and checking file existence...');
+                const analysis = yield this.analyzer.analyzeRequirements(prompt, existingFiles);
+                this.streamUpdate(`📝 Analysis Complete:`);
+                this.streamUpdate(`   Type: ${analysis.name} (${analysis.type}) - ${analysis.confidence}% confidence`);
+                this.streamUpdate(`   Reasoning: ${analysis.reasoning}`);
+                this.streamUpdate(`   Files Required: ${analysis.fileRequirements.length}`);
+                for (const req of analysis.fileRequirements) {
+                    const status = req.exists ? '✅ EXISTS' : '❌ MISSING';
+                    const operation = req.operation.toUpperCase();
+                    this.streamUpdate(`   📄 ${req.filePath} - ${status} - ${operation} (${req.priority} priority)`);
+                    this.streamUpdate(`      Purpose: ${req.purpose}`);
                 }
-            }
-            catch (error) {
-                this.streamUpdate(`❌ Emergency creation failed: ${error}`);
+                // STEP 2: Generate files
+                this.streamUpdate('🎨 Step 2: Generating batch content...');
+                const generatedFiles = yield this.generator.generateBatch(prompt, analysis, existingFiles);
+                this.streamUpdate(`✅ Generated ${generatedFiles.length} files:`);
+                for (const file of generatedFiles) {
+                    this.streamUpdate(`   📄 ${file.filePath} (${file.operation}) - ${file.content.length} chars`);
+                }
+                // STEP 3: Apply batch changes
+                this.streamUpdate('💾 Step 3: Applying batch changes...');
+                const applyResult = yield this.applyBatchChanges(generatedFiles, analysis);
+                // STEP 4: Modification Summary
+                this.streamUpdate('📊 Step 4: Updating modification summary...');
+                const createdFiles = applyResult.results.filter(r => r.operation === 'create' && r.success);
+                const updatedFiles = applyResult.results.filter(r => r.operation === 'update' && r.success);
+                for (const result of applyResult.results) {
+                    const pastTenseOp = result.operation === 'create' ? 'created' : 'updated';
+                    const operationStr = result.success ? pastTenseOp : 'failed';
+                    const linesChanged = ((_a = result.content) === null || _a === void 0 ? void 0 : _a.split('\n').length) || 0;
+                    yield modificationSummary.addChange(operationStr, result.filePath, result.success
+                        ? `${pastTenseOp[0].toUpperCase() + pastTenseOp.slice(1)} ${analysis.type}: ${analysis.name}`
+                        : `Failed to ${result.operation} file`, {
+                        success: result.success,
+                        linesChanged,
+                        reasoning: result.success ? analysis.reasoning : result.error
+                    });
+                }
+                // (Optional) Step 5: Project summary callback
+                let projectSummary = '';
+                if (projectSummaryCallback) {
+                    const summary = yield projectSummaryCallback(analysis.reasoning, prompt);
+                    if (summary) {
+                        projectSummary = summary;
+                        this.streamUpdate('📋 Project summary updated via callback.');
+                    }
+                }
+                // FINAL SUMMARY
+                this.streamUpdate(`🎉 BATCH SUCCESS!`);
+                this.streamUpdate(`   📁 Created: ${createdFiles.length} files`);
+                this.streamUpdate(`   📝 Updated: ${updatedFiles.length} files`);
+                this.streamUpdate(`   ❌ Failed: ${applyResult.failedCount} operations`);
                 return {
-                    success: false,
-                    error: `All creation methods failed: ${error}`,
-                    selectedFiles: [],
-                    addedFiles: [],
-                    tokenUsage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 }
+                    success: applyResult.successCount > 0,
+                    selectedFiles: updatedFiles.map(f => f.filePath),
+                    addedFiles: createdFiles.map(f => f.filePath),
+                    approach: 'ENHANCED_COMPONENT_ADDITION',
+                    reasoning: `Successfully processed ${analysis.name} ${analysis.type}. Applied ${applyResult.successCount}/${generatedFiles.length} file operations.`,
+                    modificationSummary: yield modificationSummary.getSummary(),
+                    componentGenerationResult: {
+                        success: true,
+                        generatedFiles: createdFiles.map(f => f.filePath),
+                        updatedFiles: updatedFiles.map(f => f.filePath),
+                        analysis,
+                        projectSummary,
+                        existingFiles
+                    },
+                    tokenUsage: {
+                        totalTokens: 0,
+                        inputTokens: 0,
+                        outputTokens: 0
+                    }
                 };
             }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.streamUpdate(`❌ Enhanced processor failed: ${message}`);
+                throw error;
+            }
+        });
+    }
+    applyBatchChanges(generatedFiles, analysis) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const results = [];
+            let successCount = 0;
+            let failedCount = 0;
+            this.streamUpdate(`💾 APPLYING BATCH CHANGES:`);
+            this.streamUpdate(`   📦 Processing ${generatedFiles.length} files...`);
+            for (const file of generatedFiles) {
+                try {
+                    this.streamUpdate(`🔧 Processing: ${file.filePath} (${file.operation})`);
+                    if (file.operation === 'create') {
+                        const createResult = yield this.pathManager.safeCreateFile(file.filePath, file.content);
+                        results.push({
+                            filePath: file.filePath,
+                            operation: 'create',
+                            success: createResult.success,
+                            content: file.content,
+                            error: createResult.error
+                        });
+                        if (createResult.success) {
+                            successCount++;
+                            this.streamUpdate(`   ✅ CREATED: ${file.filePath} (${file.content.length} chars)`);
+                        }
+                        else {
+                            failedCount++;
+                            this.streamUpdate(`   ❌ CREATE FAILED: ${file.filePath} - ${createResult.error}`);
+                        }
+                    }
+                    else if (file.operation === 'update') {
+                        const updateResult = yield this.pathManager.safeUpdateFile(file.filePath, file.content);
+                        results.push({
+                            filePath: file.filePath,
+                            operation: 'update',
+                            success: updateResult.success,
+                            content: file.content,
+                            error: updateResult.error
+                        });
+                        if (updateResult.success) {
+                            successCount++;
+                            this.streamUpdate(`   ✅ UPDATED: ${file.filePath} (${file.content.length} chars)`);
+                        }
+                        else {
+                            failedCount++;
+                            this.streamUpdate(`   ❌ UPDATE FAILED: ${file.filePath} - ${updateResult.error}`);
+                        }
+                    }
+                }
+                catch (error) {
+                    // Fallback to a valid operation to satisfy return type
+                    const fallbackOp = file.operation === 'update' ? 'update' : 'create';
+                    results.push({
+                        filePath: file.filePath,
+                        operation: fallbackOp,
+                        success: false,
+                        error: `Exception: ${error}`
+                    });
+                    failedCount++;
+                    this.streamUpdate(`   ❌ EXCEPTION: ${file.filePath} - ${error}`);
+                }
+            }
+            this.streamUpdate(`📊 BATCH CHANGES SUMMARY:`);
+            this.streamUpdate(`   ✅ Successful: ${successCount}`);
+            this.streamUpdate(`   ❌ Failed: ${failedCount}`);
+            this.streamUpdate(`   📈 Success Rate: ${Math.round((successCount / generatedFiles.length) * 100)}%`);
+            return { successCount, failedCount, results };
         });
     }
 }
 exports.EnhancedAtomicComponentProcessor = EnhancedAtomicComponentProcessor;
-// ============================================================================
-// INTEGRATION INSTRUCTIONS
-// ============================================================================
-/*
-## HOW TO INTEGRATE THIS FIX:
-
-### 1. Update your imports:
-```typescript
-// REPLACE:
-import { EnhancedAtomicComponentProcessor } from './processor/ComponentAddition';
-
-// WITH:
-import { FixedComponentProcessor } from './processor/FixedComponentAddition';
-```
-
-### 2. Update your initialization:
-```typescript
-// REPLACE:
-this.enhancedAtomicProcessor = new EnhancedAtomicComponentProcessor(
-  anthropic,
-  reactBasePath,
-  this.tokenTracker
-);
-
-// WITH:
-this.fixedProcessor = new FixedComponentProcessor(
-  anthropic,
-  reactBasePath
-);
-```
-
-### 3. Update your method call:
-```typescript
-// REPLACE:
-const result = await this.enhancedAtomicProcessor.handleComponentAddition(
-  prompt,
-  scope,
-  projectFiles,
-  modificationSummary,
-  this.componentGenerationSystem,
-  projectSummaryCallback
-);
-
-// WITH:
-const result = await this.fixedProcessor.handleComponentAddition(
-  prompt,
-  scope,
-  projectFiles,
-  modificationSummary,
-  this.componentGenerationSystem,
-  projectSummaryCallback
-);
-```
-
-## THE KEY FIXES:
-
-✅ **CRITICAL PATH FIX**: `resolveFilePath()` method ensures we NEVER try to open directories as files
-✅ **DIRECTORY VS FILE**: Clear separation between directory creation and file writing
-✅ **PROPER FILE EXTENSIONS**: Always ensures .tsx extension is added
-✅ **FILE PATH VALIDATION**: Validates paths before operations
-✅ **COMPREHENSIVE ERROR HANDLING**: Detailed error messages for debugging
-✅ **EMERGENCY FALLBACK**: If all else fails, creates basic component
-
-## ROOT CAUSE SOLVED:
-
-Your original error was caused by the system trying to:
-```
-open('C:\Users\KIIT\Documents\...\src')  // ❌ WRONG - trying to open directory as file
-```
-
-The fix ensures we always do:
-```
-mkdir('C:\Users\KIIT\Documents\...\src\components')     // ✅ Create directory
-writeFile('C:\Users\KIIT\Documents\...\src\components\Component.tsx', content)  // ✅ Write file
-```
-
-This completely eliminates the EISDIR error you were experiencing.
-*/ 
 //# sourceMappingURL=ComponentAddition.js.map

@@ -180,29 +180,47 @@ ${heuristicResult ? `**HEURISTIC ANALYSIS:**\nSuggested: ${heuristicResult.sugge
 
 **METHOD OPTIONS (in order of preference - choose the most specific that applies):**
 
-**1. TARGETED_NODES** - For specific element changes:
+1. TARGETED_NODES – For specific existing element changes:
 ✅ CHOOSE THIS IF the request targets:
-- A specific  text, or element ("make the login button red")
-- A single color, label, or style change
-- only exception is icon change or icon addition are not catered by this approach as they require import
-- One particular component element
-- Clear, focused modifications to identifiable elementsf
-- Requests with words like "the button", "this text", "that color"
--add a floating button
--chat something to something mainly text
--Use Arial font for all headings
--Make the title bigger
--change the image 
-❌ Examples: "change the submit button color", "update welcome text", "make signin button bigger"
+A specific existing element like a button, text, color, image, or style.
+Modifying a single UI component or element (not adding).
+Requests with words like:
+“change the button color”
+“make this text bold”
+“update heading font”
+“replace the image”
+“make title larger”
+“change button style”
+Paragraph or text content changes.
+Requests related to modifying existing components.
+🚫 DO NOT CHOOSE THIS if:
+The request says “add a new button”, “add”, “create”, “build”.
+The intent is to introduce a new UI element that doesn’t already exist.
+❌ Examples:
+"add a new button to the header" → ❌ Not TARGETED_NODES
+"change the submit button color" → ✅ TARGETED_NODES
+"make the login button red" → ✅ TARGETED_NODES
+"replace the welcome text" → ✅ TARGETED_NODES
+"make title bold and centered" → ✅ TARGETED_NODES
 
-**2. COMPONENT_ADDITION** - For creating new things:
+2. COMPONENT_ADDITION – For creating new UI elements or features or pages:
 ✅ CHOOSE THIS IF the request involves:
-- Creating entirely new components, pages, or features
-- Adding new functionality that doesn't exist
-- Building something from scratch
--add a floating button is a exception it is not a component addition
-- Requests with "create", "add new", "build", "make a new"
--make a card add it in page
+Adding new components, pages, or UI elements.
+Creating something that doesn’t exist yet.
+Phrases like:
+“add a button”
+“create a card”
+“make a new page”
+"make about page"
+“add new section/component/header”
+“build user profile component”
+✅ Includes:
+Adding new buttons (e.g., “add a new button to all pages”).
+Creating entire sections, layout blocks, or UI structures.
+✅ Examples:
+"add a new login button" → ✅ COMPONENT_ADDITION
+"create a contact form component" → ✅ COMPONENT_ADDITION
+"add a testimonial card to the homepage" → ✅ COMPONENT_ADDITION
 
 
 ❌ Examples: "create a contact page", "add new user dashboard", "build login component"
